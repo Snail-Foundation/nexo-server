@@ -2,7 +2,7 @@
 name = "nexo-server"
 version = "0.1.0"
 edition = "2024"
-description = "Servidor de sincronización de Nexo"
+description = "Nexo synchronization server"
 license = "MIT"
 
 [dependencies]
