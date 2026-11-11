@@ -1,0 +1,9 @@
+[package]
+name = "nexo-server"
+version = "0.1.0"
+edition = "2024"
+description = "Servidor de sincronización de Nexo"
+license = "MIT"
+
+[dependencies]
+nexo-core = { path = "../nexo-core" }
