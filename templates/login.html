@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Entrar · Nexo Restaurantes{% endblock %}
+
+{% block body %}
+<main class="login-page">
+  <section class="login-card">
+    <header class="login-header">
+      <p class="eyebrow">Nexo Restaurantes</p>
+      <h1>Entrar</h1>
+      <p class="muted">Mesas, comandas y caja</p>
+    </header>
+
+    <form method="post" action="/login" class="stack">
+      <label class="field">
+        <span>Usuario</span>
+        <input
+          name="user"
+          type="text"
+          autocomplete="username"
+          autocapitalize="words"
+          required
+          autofocus
+        >
+      </label>
+
+      <label class="field">
+        <span>PIN</span>
+        <input
+          name="pin"
+          type="password"
+          inputmode="numeric"
+          pattern="[0-9]{4,8}"
+          autocomplete="current-password"
+          required
+        >
+      </label>
+
+      {% if !error.is_empty() %}
+      <p class="error" role="alert">{{ error }}</p>
+      {% endif %}
+
+      <button class="primary" type="submit">Entrar</button>
+    </form>
+
+    <p class="hint">
+      La web funciona en la red local. Si no hay conexión, avisa a la caja.
+    </p>
+  </section>
+</main>
+{% endblock %}
