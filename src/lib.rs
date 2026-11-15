@@ -5,6 +5,8 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod projection;
+pub mod snapshot;
 pub mod state;
 pub mod sync;
 pub mod time;
@@ -23,11 +25,19 @@ pub fn router(state: AppState) -> Router {
         .route("/login", get(web::login_page).post(web::login_submit))
         .route("/logout", post(web::logout))
         .route("/app", get(web::app_page))
+        .route("/app/tables", get(web::tables_page))
+        .route("/app/takeout", get(web::takeout_page))
+        .route("/app/menu", get(web::menu_page))
+        .route(
+            "/app/menu/items/{id}/availability",
+            post(web::toggle_item_availability),
+        )
         .route("/app/status", get(web::app_status))
         .route("/static/app.css", get(web::stylesheet))
         .route("/static/htmx.min.js", get(web::htmx))
         .route("/api/health", get(api::health))
         .route("/api/login", post(api::login))
+        .route("/api/link", post(api::link))
         .route("/api/sync/push", post(api::push))
         .route("/api/sync/pull", get(api::pull))
         .layer(TraceLayer::new_for_http())

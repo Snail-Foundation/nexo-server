@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{self, SessionKind};
 use crate::error::AppError;
+use crate::snapshot;
 use crate::state::AppState;
 use crate::sync;
 
@@ -88,13 +89,32 @@ pub async fn login(
     }))
 }
 
+/// Imports a desktop snapshot into an empty server.
+pub async fn link(
+    State(state): State<AppState>,
+    Json(request): Json<snapshot::LinkRequest>,
+) -> Result<Json<snapshot::LinkResponse>, AppError> {
+    let response = snapshot::link(&state.pool, request).await?;
+
+    Ok(Json(response))
+}
+
 /// Appends desktop operations to the server log.
 pub async fn push(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<sync::PushRequest>,
 ) -> Result<Json<sync::PushResponse>, AppError> {
-    let _session = auth::api_session(&state.pool, &headers).await?;
+    let principal = auth::sync_principal(&state.pool, &headers).await?;
+
+    if let auth::SyncPrincipal::Device(device) = &principal {
+        for operation in &request.operations {
+            if operation.device_id.to_string() != device.device_id {
+                return Err(AppError::Forbidden);
+            }
+        }
+    }
+
     let response = sync::push(&state.pool, request.operations).await?;
 
     Ok(Json(response))
@@ -114,7 +134,7 @@ pub async fn pull(
     headers: HeaderMap,
     Query(query): Query<PullQuery>,
 ) -> Result<Json<sync::PullResponse>, AppError> {
-    let _session = auth::api_session(&state.pool, &headers).await?;
+    let _principal = auth::sync_principal(&state.pool, &headers).await?;
 
     let response = sync::pull(
         &state.pool,
@@ -274,5 +294,122 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn linked_device_can_push_and_pull_with_its_token() {
+        let state = test_support::state().await;
+        let snapshot = snapshot::sample_snapshot();
+        let item_id = snapshot.items[0].id.parse::<Uuid>().unwrap();
+
+        let link_response = snapshot::link(
+            &state.pool,
+            snapshot::LinkRequest {
+                server_user: "Admin".to_owned(),
+                server_pin: "1234".to_owned(),
+                snapshot,
+            },
+        )
+        .await
+        .unwrap();
+
+        let operation = Operation::new(
+            link_response.device_id.parse::<DeviceId>().unwrap(),
+            Some(link_response.branch_id.parse().unwrap()),
+            OperationKind::MenuItemAvailabilityChanged,
+            item_id,
+            json!({ "is_available": false }),
+            1_700_000_000_000,
+        );
+
+        let push_body = json!({ "operations": [operation] }).to_string();
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sync/push")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", link_response.device_token),
+                    )
+                    .body(Body::from(push_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let pushed = json_body(response).await;
+        assert_eq!(pushed["accepted"], 1);
+
+        let available: bool =
+            sqlx::query_scalar("SELECT is_available FROM menu_item WHERE id = ?1")
+                .bind(item_id.to_string())
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert!(!available);
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sync/pull?since=0")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", link_response.device_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let pulled = json_body(response).await;
+        assert_eq!(pulled["operations"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_device_cannot_push_operations_for_another_device() {
+        let state = test_support::state().await;
+        let link_response = snapshot::link(
+            &state.pool,
+            snapshot::LinkRequest {
+                server_user: "Admin".to_owned(),
+                server_pin: "1234".to_owned(),
+                snapshot: snapshot::sample_snapshot(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let operation = Operation::new(
+            DeviceId::new(),
+            None,
+            OperationKind::MenuItemAvailabilityChanged,
+            Uuid::now_v7(),
+            json!({ "is_available": false }),
+            1_700_000_000_000,
+        );
+
+        let push_body = json!({ "operations": [operation] }).to_string();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sync/push")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", link_response.device_token),
+                    )
+                    .body(Body::from(push_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

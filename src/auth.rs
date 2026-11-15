@@ -52,6 +52,49 @@ pub struct LoginResult {
     pub user: SessionUser,
 }
 
+/// Authenticated user data without a session. Used by the linking endpoint.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedUser {
+    pub user_id: String,
+    pub display_name: String,
+    pub role: String,
+    pub business_id: String,
+    pub business_name: String,
+}
+
+/// A desktop device authenticated by its device token.
+#[derive(Debug, Clone)]
+pub struct DeviceSession {
+    pub device_id: String,
+    pub business_id: String,
+    pub branch_id: Option<String>,
+}
+
+/// Caller allowed to push or pull operations.
+#[derive(Debug, Clone)]
+pub enum SyncPrincipal {
+    User(SessionUser),
+    Device(DeviceSession),
+}
+
+impl SyncPrincipal {
+    /// Returns the device ID that owns the session, if any.
+    pub fn device_id(&self) -> Option<&str> {
+        match self {
+            Self::User(user) => user.device_id.as_deref(),
+            Self::Device(device) => Some(&device.device_id),
+        }
+    }
+
+    /// Returns the business of the caller.
+    pub fn business_id(&self) -> &str {
+        match self {
+            Self::User(user) => &user.business_id,
+            Self::Device(device) => &device.business_id,
+        }
+    }
+}
+
 /// Creates the first business, branch, server device, and admin user.
 ///
 /// The seed only runs when there are no users and `NEXO_ADMIN_PIN` is set.
@@ -157,6 +200,57 @@ pub async fn login(
             .map_err(|_| AppError::Validation("invalid device id".to_owned()))?;
     }
 
+    let Some(user) = authenticate(pool, user_name, pin).await? else {
+        return Ok(None);
+    };
+
+    let token = random_token();
+    let token_hash = hash_token(&token);
+    let csrf_token = random_token();
+    let session_id = Uuid::now_v7().to_string();
+    let now = now_ms();
+    let expires_at_ms = now + session_hours * 60 * 60 * 1000;
+
+    sqlx::query(
+        "INSERT INTO auth_session (
+            id, business_id, user_id, device_id, kind, token_hash, csrf_token,
+            created_at_ms, expires_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )
+    .bind(&session_id)
+    .bind(&user.business_id)
+    .bind(&user.user_id)
+    .bind(device_id)
+    .bind(kind.as_str())
+    .bind(token_hash)
+    .bind(&csrf_token)
+    .bind(now)
+    .bind(expires_at_ms)
+    .execute(pool)
+    .await?;
+
+    Ok(Some(LoginResult {
+        token,
+        expires_at_ms,
+        user: SessionUser {
+            session_id,
+            user_id: user.user_id,
+            display_name: user.display_name,
+            role: user.role,
+            business_id: user.business_id,
+            business_name: user.business_name,
+            csrf_token,
+            device_id: device_id.map(str::to_owned),
+        },
+    }))
+}
+
+/// Verifies a user name and PIN without creating a session.
+pub async fn authenticate(
+    pool: &SqlitePool,
+    user_name: &str,
+    pin: &str,
+) -> Result<Option<AuthenticatedUser>, AppError> {
     let row = sqlx::query(
         "SELECT
             u.id AS user_id,
@@ -187,44 +281,12 @@ pub async fn login(
         return Ok(None);
     }
 
-    let token = random_hex(32);
-    let token_hash = sha256_hex(&token);
-    let csrf_token = random_hex(32);
-    let session_id = Uuid::now_v7().to_string();
-    let now = now_ms();
-    let expires_at_ms = now + session_hours * 60 * 60 * 1000;
-
-    sqlx::query(
-        "INSERT INTO auth_session (
-            id, business_id, user_id, device_id, kind, token_hash, csrf_token,
-            created_at_ms, expires_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-    )
-    .bind(&session_id)
-    .bind(row.try_get::<String, _>("business_id")?)
-    .bind(row.try_get::<String, _>("user_id")?)
-    .bind(device_id)
-    .bind(kind.as_str())
-    .bind(token_hash)
-    .bind(&csrf_token)
-    .bind(now)
-    .bind(expires_at_ms)
-    .execute(pool)
-    .await?;
-
-    Ok(Some(LoginResult {
-        token,
-        expires_at_ms,
-        user: SessionUser {
-            session_id,
-            user_id: row.try_get("user_id")?,
-            display_name: row.try_get("display_name")?,
-            role: row.try_get("role")?,
-            business_id: row.try_get("business_id")?,
-            business_name: row.try_get("business_name")?,
-            csrf_token,
-            device_id: device_id.map(str::to_owned),
-        },
+    Ok(Some(AuthenticatedUser {
+        user_id: row.try_get("user_id")?,
+        display_name: row.try_get("display_name")?,
+        role: row.try_get("role")?,
+        business_id: row.try_get("business_id")?,
+        business_name: row.try_get("business_name")?,
     }))
 }
 
@@ -242,17 +304,55 @@ pub async fn web_session(
 
 /// Loads an API session from the bearer token.
 pub async fn api_session(pool: &SqlitePool, headers: &HeaderMap) -> Result<SessionUser, AppError> {
-    let token = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or(AppError::Unauthorized)?;
+    let token = bearer_token(headers).ok_or(AppError::Unauthorized)?;
 
     lookup_session(pool, token, SessionKind::Api)
         .await?
         .ok_or(AppError::Unauthorized)
+}
+
+/// Loads the caller of a sync request: an API session or a linked device.
+pub async fn sync_principal(
+    pool: &SqlitePool,
+    headers: &HeaderMap,
+) -> Result<SyncPrincipal, AppError> {
+    let token = bearer_token(headers).ok_or(AppError::Unauthorized)?;
+
+    if let Some(user) = lookup_session(pool, token, SessionKind::Api).await? {
+        return Ok(SyncPrincipal::User(user));
+    }
+
+    if let Some(device) = lookup_device(pool, token).await? {
+        return Ok(SyncPrincipal::Device(device));
+    }
+
+    Err(AppError::Unauthorized)
+}
+
+/// Returns the default branch of a business.
+pub async fn default_branch_id(
+    pool: &SqlitePool,
+    business_id: &str,
+) -> Result<Option<String>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM branch
+         WHERE business_id = ?1
+         ORDER BY is_default DESC, created_at_ms
+         LIMIT 1",
+    )
+    .bind(business_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Generates a random bearer token for a device.
+pub fn random_token() -> String {
+    random_hex(32)
+}
+
+/// Hashes a bearer token before storing it.
+pub fn hash_token(token: &str) -> String {
+    sha256_hex(token)
 }
 
 /// Revokes a session. Logout is idempotent.
@@ -315,6 +415,15 @@ pub fn validate_pin(pin: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 async fn lookup_session(
     pool: &SqlitePool,
     token: &str,
@@ -363,7 +472,39 @@ async fn lookup_session(
     }))
 }
 
-fn hash_pin(pin: &str) -> Result<String, AppError> {
+async fn lookup_device(pool: &SqlitePool, token: &str) -> Result<Option<DeviceSession>, AppError> {
+    let token_hash = sha256_hex(token);
+
+    let row = sqlx::query(
+        "SELECT id, business_id, branch_id
+         FROM device
+         WHERE token_hash = ?1 AND kind = 'desktop'
+         LIMIT 1",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let device_id: String = row.try_get("id")?;
+
+    sqlx::query("UPDATE device SET last_seen_at_ms = ?2 WHERE id = ?1")
+        .bind(&device_id)
+        .bind(now_ms())
+        .execute(pool)
+        .await?;
+
+    Ok(Some(DeviceSession {
+        device_id,
+        business_id: row.try_get("business_id")?,
+        branch_id: row.try_get("branch_id")?,
+    }))
+}
+
+pub fn hash_pin(pin: &str) -> Result<String, AppError> {
     let salt = SaltString::generate(&mut OsRng);
 
     Argon2::default()

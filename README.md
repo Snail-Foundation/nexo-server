@@ -25,15 +25,21 @@ and the same URLs in both cases.
 
 - Axum 0.8 + SQLx 0.9 (SQLite) + Askama 0.16 + HTMX, with mobile-first CSS and
   no Node build.
-- SQLite schema v1 with 10 tables: business, branch, device, users, auth
-  sessions, server settings, operation log, device cursors, sync anomalies, and
-  audit events.
+- SQLite schema v2 with 16 tables: the v1 core (business, branch, device,
+  users, auth sessions, server settings, operation log, device cursors, sync
+  anomalies, audit events) plus master-data projections for business settings,
+  menu categories, menu items, dining tables, tax rate, and payment methods.
 - PIN login with Argon2 hashes, hashed bearer tokens, `HttpOnly` +
   `SameSite=Strict` web session cookies, and CSRF validation on logout.
 - Append-only operation log with idempotent push by operation ID and ordered
-  pull by server sequence.
-- Spanish login and web shell with an online/offline banner and a live status
-  fragment.
+  pull by server sequence. Accepted operations are projected into the
+  master-data read model.
+- Snapshot linking: an empty server accepts a desktop snapshot and issues a
+  device token; a non-empty server rejects the link with a conflict. Servers
+  are never merged silently.
+- Spanish web views for tables, takeout, and menu, with an online/offline
+  banner, a live status fragment, and the sold-out toggle that writes an
+  operation to the log.
 
 The ordering, kitchen, and cashier screens are built in the next phases.
 
@@ -46,13 +52,30 @@ The ordering, kitchen, and cashier screens are built in the next phases.
 | `POST` | `/login` | Validates the PIN and sets the session cookie |
 | `POST` | `/logout` | Revokes the session; requires the CSRF token |
 | `GET` | `/app` | Waiter/kitchen web shell |
+| `GET` | `/app/tables` | Table grid |
+| `GET` | `/app/takeout` | Takeout order list |
+| `GET` | `/app/menu` | Menu read view with the sold-out toggle |
+| `POST` | `/app/menu/items/{id}/availability` | Marks an item available or sold out; requires the CSRF token |
 | `GET` | `/app/status` | HTMX status fragment |
 | `GET` | `/static/app.css` | Embedded stylesheet |
 | `GET` | `/static/htmx.min.js` | Embedded HTMX 2.0.4 |
 | `GET` | `/api/health` | Liveness and database check |
 | `POST` | `/api/login` | Exchanges a PIN for an API bearer token |
+| `POST` | `/api/link` | Imports a desktop snapshot into an empty server and issues a device token |
 | `POST` | `/api/sync/push` | Appends operations; requires a bearer token |
 | `GET` | `/api/sync/pull` | Pulls operations after `since`; requires a bearer token |
+
+## Linking
+
+`POST /api/link` receives the server admin user, its PIN, and the desktop
+snapshot. The server validates the credentials and imports the snapshot only
+when its own data is empty; otherwise it returns `409 Conflict`. On success it
+returns the device ID, a device token, the business and branch IDs, and the
+last sequence.
+
+After linking, the desktop admin replaces the seed `Admin` user, so the web app
+logs in with the desktop credentials. The device token authenticates push and
+pull requests, and the server only accepts operations authored by that device.
 
 ## Configuration
 

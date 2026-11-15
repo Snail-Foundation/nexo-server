@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool};
 
 use crate::error::AppError;
+use crate::projection::{self, ProjectionOutcome};
 use crate::time::now_ms;
 
 pub const DEFAULT_PULL_LIMIT: i64 = 200;
@@ -112,6 +113,24 @@ pub async fn push(pool: &SqlitePool, operations: Vec<Operation>) -> Result<PushR
             duplicates += 1;
         } else {
             accepted += 1;
+
+            match projection::apply(&mut transaction, operation).await? {
+                ProjectionOutcome::Applied | ProjectionOutcome::Ignored => {}
+                ProjectionOutcome::Skipped(reason) => {
+                    sqlx::query(
+                        "INSERT INTO sync_anomaly (
+                            id, operation_id, device_id, kind, details, created_at_ms
+                         ) VALUES (?1, ?2, ?3, 'projection_skipped', ?4, ?5)",
+                    )
+                    .bind(Uuid::now_v7().to_string())
+                    .bind(operation.id.to_string())
+                    .bind(operation.device_id.to_string())
+                    .bind(json!({ "reason": reason }).to_string())
+                    .bind(received_at_ms)
+                    .execute(&mut *transaction)
+                    .await?;
+                }
+            }
         }
     }
 
@@ -170,6 +189,74 @@ pub async fn pull(pool: &SqlitePool, since: i64, limit: i64) -> Result<PullRespo
         next,
         has_more,
     })
+}
+
+/// Appends an operation written by the web app, applies its projection, and
+/// records an audit event in one transaction.
+pub async fn append_web_operation(
+    pool: &SqlitePool,
+    operation: &Operation,
+    actor_user_id: &str,
+    business_id: &str,
+    branch_id: Option<&str>,
+    action: &str,
+    details: Value,
+) -> Result<(), AppError> {
+    operation
+        .validate()
+        .map_err(|error| AppError::Validation(error.to_string()))?;
+
+    let payload = serde_json::to_string(&operation.payload)?;
+    let now = now_ms();
+    let mut transaction = pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO operation_log (
+            id, device_id, branch_id, kind, entity_id, payload,
+            schema_version, created_at_ms, received_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )
+    .bind(operation.id.to_string())
+    .bind(operation.device_id.to_string())
+    .bind(operation.branch_id.map(|branch_id| branch_id.to_string()))
+    .bind(operation.kind.as_str())
+    .bind(operation.entity_id.to_string())
+    .bind(payload)
+    .bind(i64::from(operation.schema_version))
+    .bind(operation.created_at_ms)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await?;
+
+    match projection::apply(&mut transaction, operation).await? {
+        ProjectionOutcome::Applied | ProjectionOutcome::Ignored => {}
+        ProjectionOutcome::Skipped(reason) => {
+            return Err(AppError::Validation(reason));
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO audit_event (
+            id, business_id, branch_id, actor_user_id, device_id, action,
+            entity_type, entity_id, details, created_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(business_id)
+    .bind(branch_id)
+    .bind(actor_user_id)
+    .bind(operation.device_id.to_string())
+    .bind(action)
+    .bind(operation.kind.as_str())
+    .bind(operation.entity_id.to_string())
+    .bind(serde_json::to_string(&details)?)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    Ok(())
 }
 
 /// Records a rejected or conflicting operation for human review.

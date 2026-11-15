@@ -37,6 +37,9 @@ pub enum AppError {
     #[error("not found")]
     NotFound,
 
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     #[error("validation failed: {0}")]
     Validation(String),
 
@@ -50,6 +53,7 @@ impl IntoResponse for AppError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_owned()),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_owned()),
             Self::NotFound => (StatusCode::NOT_FOUND, "not found".to_owned()),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message.clone()),
             Self::Validation(message) => (StatusCode::UNPROCESSABLE_ENTITY, message.clone()),
             Self::Config(message) => {
                 tracing::error!(error = %message, "invalid configuration");

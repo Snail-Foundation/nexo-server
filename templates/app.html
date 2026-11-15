@@ -1,81 +1,44 @@
-{% extends "base.html" %}
+{% extends "shell.html" %}
 
-{% block title %}{{ business_name }} · Nexo Restaurantes{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>Hola, {{ common.user_name }}</h1>
+  <p class="muted">Elige un módulo. La web está conectada al servidor local.</p>
+</section>
 
-{% block body %}
-<div id="offline" class="offline" hidden>
-  Sin conexión con el servidor. Avisa a la caja.
-</div>
+<section class="grid" aria-label="Módulos">
+  <a class="module link" href="/app/tables">
+    <h2>Mesas</h2>
+    <p>Mesas libres y ocupadas</p>
+  </a>
+  <a class="module link" href="/app/takeout">
+    <h2>Para llevar</h2>
+    <p>Pedidos de mostrador</p>
+  </a>
+  <a class="module link" href="/app/menu">
+    <h2>Menú</h2>
+    <p>Platos y agotados</p>
+  </a>
+  <article class="module">
+    <h2>Cocina</h2>
+    <p>Próxima fase</p>
+  </article>
+  <article class="module">
+    <h2>Caja</h2>
+    <p>Próxima fase</p>
+  </article>
+  <article class="module">
+    <h2>Reportes</h2>
+    <p>Próxima fase</p>
+  </article>
+</section>
 
-<header class="topbar">
-  <div class="brand">
-    <span class="brand-mark" aria-hidden="true">N</span>
-    <div>
-      <strong>{{ business_name }}</strong>
-      <span class="muted">{{ user_name }} · {{ role_label }}</span>
-    </div>
-  </div>
-
-  <form method="post" action="/logout">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button class="ghost" type="submit">Salir</button>
-  </form>
-</header>
-
-<main class="layout">
-  <section class="hero">
-    <h1>Hola, {{ user_name }}</h1>
-    <p class="muted">Elige un módulo. La web está conectada al servidor local.</p>
-  </section>
-
-  <section class="grid" aria-label="Módulos">
-    <article class="module">
-      <h2>Mesas</h2>
-      <p>Próxima fase</p>
-    </article>
-    <article class="module">
-      <h2>Cocina</h2>
-      <p>Próxima fase</p>
-    </article>
-    <article class="module">
-      <h2>Caja</h2>
-      <p>Próxima fase</p>
-    </article>
-    <article class="module">
-      <h2>Menú</h2>
-      <p>Próxima fase</p>
-    </article>
-    <article class="module">
-      <h2>Reportes</h2>
-      <p>Próxima fase</p>
-    </article>
-    <article class="module">
-      <h2>Ajustes</h2>
-      <p>Próxima fase</p>
-    </article>
-  </section>
-
-  <section
-    class="card status"
-    hx-get="/app/status"
-    hx-trigger="load, every 15s"
-    hx-swap="innerHTML"
-  >
-    <p class="muted">Conectando con el servidor…</p>
-  </section>
-
-  <p class="footer">Nexo Servidor v{{ version }} · Red local</p>
-</main>
-
-<script>
-  (function () {
-    var banner = document.getElementById("offline");
-    function refresh() {
-      banner.hidden = navigator.onLine;
-    }
-    window.addEventListener("online", refresh);
-    window.addEventListener("offline", refresh);
-    refresh();
-  })();
-</script>
+<section
+  class="card status"
+  hx-get="/app/status"
+  hx-trigger="load, every 15s"
+  hx-swap="innerHTML"
+>
+  <p class="muted">Conectando con el servidor…</p>
+</section>
 {% endblock %}

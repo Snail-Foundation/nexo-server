@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}{{ common.business_name }} · Nexo Restaurantes{% endblock %}
+
+{% block body %}
+<div id="offline" class="offline" hidden>
+  Sin conexión con el servidor. Avisa a la caja.
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">N</span>
+    <div>
+      <strong>{{ common.business_name }}</strong>
+      <span class="muted">{{ common.user_name }} · {{ common.role_label }}</span>
+    </div>
+  </div>
+
+  <form method="post" action="/logout">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <button class="ghost" type="submit">Salir</button>
+  </form>
+</header>
+
+<nav class="tabs" aria-label="Secciones">
+  <a href="/app" class="{% if active == "home" %}active{% endif %}">Inicio</a>
+  <a href="/app/tables" class="{% if active == "tables" %}active{% endif %}">Mesas</a>
+  <a href="/app/takeout" class="{% if active == "takeout" %}active{% endif %}">Para llevar</a>
+  <a href="/app/menu" class="{% if active == "menu" %}active{% endif %}">Menú</a>
+</nav>
+
+<main class="layout">
+  {% block content %}{% endblock %}
+
+  <p class="footer">Nexo Servidor v{{ common.version }} · Red local</p>
+</main>
+
+<script>
+  (function () {
+    var banner = document.getElementById("offline");
+    function refresh() {
+      banner.hidden = navigator.onLine;
+    }
+    window.addEventListener("online", refresh);
+    window.addEventListener("offline", refresh);
+    refresh();
+  })();
+</script>
+{% endblock %}

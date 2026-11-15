@@ -1,0 +1,54 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<section class="hero">
+  <h1>Menú</h1>
+  <p class="muted">Marca un plato como agotado para que deje de ofrecerse. La desktop recibe el cambio al sincronizar.</p>
+</section>
+
+{% if categories.is_empty() %}
+<section class="card empty">
+  <h2>Todavía no hay platos</h2>
+  <p class="muted">Crea el menú en la desktop y vuelve a sincronizar.</p>
+</section>
+{% else %}
+{% for category in categories %}
+<section class="card">
+  <h2>{{ category.name }}</h2>
+
+  {% if category.items.is_empty() %}
+  <p class="muted">Sin platos en esta categoría.</p>
+  {% else %}
+  <ul class="menu-list">
+    {% for item in category.items %}
+    <li class="menu-item">
+      <div class="menu-info">
+        <strong>{{ item.name }}</strong>
+        {% if !item.description.is_empty() %}
+        <span class="muted">{{ item.description }}</span>
+        {% endif %}
+      </div>
+      <span class="price">{{ item.price }}</span>
+      {% if item.is_available %}
+      <span class="badge ok">Disponible</span>
+      {% else %}
+      <span class="badge off">Agotado</span>
+      {% endif %}
+      <form method="post" action="/app/menu/items/{{ item.id }}/availability">
+        <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+        {% if item.is_available %}
+        <input type="hidden" name="is_available" value="false">
+        <button class="ghost" type="submit">Marcar agotado</button>
+        {% else %}
+        <input type="hidden" name="is_available" value="true">
+        <button class="ghost" type="submit">Marcar disponible</button>
+        {% endif %}
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endfor %}
+{% endif %}
+{% endblock %}
