@@ -3,7 +3,7 @@
 {% block content %}
 <section class="hero">
   <h1>Mesas</h1>
-  <p class="muted">Toca una mesa para abrir una comanda. Las comandas llegan en la siguiente fase.</p>
+  <p class="muted">Abre una mesa libre o entra al pedido de una mesa ocupada.</p>
 </section>
 
 {% if tables.is_empty() %}
@@ -12,14 +12,38 @@
   <p class="muted">Crea las mesas en la desktop y vuelve a sincronizar.</p>
 </section>
 {% else %}
-<section class="grid" aria-label="Mesas">
+<section class="grid tables-grid" aria-label="Mesas">
   {% for table in tables %}
-  <article class="module table">
-    <h2>{{ table.name }}</h2>
-    {% if !table.zone.is_empty() %}
-    <p class="muted">{{ table.zone }}</p>
-    {% endif %}
-    <span class="badge ok">Libre</span>
+  <article class="module table-card{% if table.order.is_some() %} occupied{% endif %}">
+    <div class="table-head">
+      <div>
+        <h2>{{ table.name }}</h2>
+        {% if !table.zone.is_empty() %}
+        <p class="muted">{{ table.zone }}</p>
+        {% endif %}
+      </div>
+      {% if table.order.is_some() %}
+      <span class="badge ok">Ocupada</span>
+      {% else %}
+      <span class="badge neutral">Libre</span>
+      {% endif %}
+    </div>
+
+    {% match table.order %}
+    {% when Some with (order) %}
+    <dl class="table-meta">
+      <div><dt>Código</dt><dd>{{ order.display_code }}</dd></div>
+      <div><dt>Estado</dt><dd>{{ order.status_label }}</dd></div>
+      <div><dt>Abierto</dt><dd>{{ order.opened_at }}</dd></div>
+      <div><dt>Total</dt><dd>{{ order.total }}</dd></div>
+    </dl>
+    <a class="button-link" href="/app/orders/{{ order.id }}">Ver pedido</a>
+    {% when None %}
+    <form method="post" action="/app/tables/{{ table.id }}/open">
+      <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+      <button class="primary" type="submit">Abrir mesa</button>
+    </form>
+    {% endmatch %}
   </article>
   {% endfor %}
 </section>

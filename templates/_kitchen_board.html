@@ -1,0 +1,58 @@
+{% if orders.is_empty() %}
+<section class="card empty">
+  <h2>No hay comandas pendientes</h2>
+  <p class="muted">Las rondas enviadas aparecen aquí.</p>
+</section>
+{% else %}
+<section class="kitchen-grid" aria-label="Comandas">
+  {% for order in orders %}
+  <article class="card kitchen-card">
+    <header class="kitchen-head">
+      <div>
+        <p class="eyebrow">{{ order.order_type_label }} · {{ order.display_code }}</p>
+        <h2>{{ order.label }}</h2>
+        <p class="muted">Abierto {{ order.opened_at }}</p>
+      </div>
+      {% if order.has_sent %}
+      <form
+        method="post"
+        action="/app/orders/{{ order.id }}/ready"
+        hx-post="/app/orders/{{ order.id }}/ready"
+        hx-target="#kitchen-board"
+        hx-swap="innerHTML"
+      >
+        <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+        <button class="ghost" type="submit">Todo listo</button>
+      </form>
+      {% endif %}
+    </header>
+    <ul class="line-list">
+      {% for line in order.lines %}
+      <li class="kitchen-line">
+        <div class="line-main">
+          <strong>{{ line.quantity }}× {{ line.description }}</strong>
+          <span class="muted">Ronda {{ line.round_number }} · {{ line.sent_minutes }} min</span>
+          {% if !line.notes.is_empty() %}
+          <span class="note">{{ line.notes }}</span>
+          {% endif %}
+        </div>
+        <span class="badge {{ line.status_class }}">{{ line.status_label }}</span>
+        {% if line.is_sent %}
+        <form
+          method="post"
+          action="/app/orders/{{ order.id }}/lines/{{ line.id }}/ready"
+          hx-post="/app/orders/{{ order.id }}/lines/{{ line.id }}/ready"
+          hx-target="#kitchen-board"
+          hx-swap="innerHTML"
+        >
+          <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+          <button class="primary" type="submit">Listo</button>
+        </form>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </article>
+  {% endfor %}
+</section>
+{% endif %}

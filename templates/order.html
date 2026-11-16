@@ -1,0 +1,123 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<section class="hero order-hero">
+  <div>
+    <p class="eyebrow">{{ order.order_type_label }} · {{ order.display_code }}</p>
+    <h1>{{ order.label }}</h1>
+    <p class="muted">
+      Abierto {{ order.opened_at }} ·
+      <span class="badge {{ order.status_class }}">{{ order.status_label }}</span>
+    </p>
+  </div>
+  <a class="button-link ghost" href="/app/tables">Volver a mesas</a>
+</section>
+
+{% if order.rounds.is_empty() %}
+<section class="card empty">
+  <h2>Sin líneas</h2>
+  <p class="muted">Agrega el primer plato para esta ronda.</p>
+</section>
+{% else %}
+{% for round in order.rounds %}
+<section class="card round-card">
+  <h2>Ronda {{ round.round_number }}</h2>
+  <ul class="line-list">
+    {% for line in round.lines %}
+    <li class="order-line{% if line.is_voided %} voided{% endif %}">
+      <div class="line-main">
+        <strong>{{ line.quantity }}× {{ line.description }}</strong>
+        {% if !line.notes.is_empty() %}
+        <span class="muted">{{ line.notes }}</span>
+        {% endif %}
+        {% if !line.void_reason.is_empty() %}
+        <span class="muted">Anulada: {{ line.void_reason }}</span>
+        {% endif %}
+      </div>
+      <span class="price">{{ line.total }}</span>
+      <span class="badge {{ line.status_class }}">{{ line.status_label }}</span>
+      <div class="line-actions">
+        {% if line.can_ready %}
+        <form method="post" action="/app/orders/{{ order.id }}/lines/{{ line.id }}/ready">
+          <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+          <button class="ghost" type="submit">Listo</button>
+        </form>
+        {% endif %}
+        {% if line.can_serve %}
+        <form method="post" action="/app/orders/{{ order.id }}/lines/{{ line.id }}/served">
+          <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+          <button class="ghost" type="submit">Servido</button>
+        </form>
+        {% endif %}
+      </div>
+      {% if line.can_void %}
+      <form method="post" action="/app/orders/{{ order.id }}/lines/{{ line.id }}/void" class="void-form">
+        <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+        <input name="reason" placeholder="Motivo de anulación" required>
+        <button class="danger" type="submit">Anular</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endfor %}
+{% endif %}
+
+<section class="card total-card">
+  <div class="total-row">
+    <span>Total</span>
+    <strong>{{ order.total }}</strong>
+  </div>
+  <div class="actions">
+    {% if order.pending_lines > 0 %}
+    <form method="post" action="/app/orders/{{ order.id }}/send">
+      <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+      <button class="primary" type="submit">Enviar ronda a cocina</button>
+    </form>
+    {% endif %}
+    {% if order.ready_lines > 0 %}
+    <form method="post" action="/app/orders/{{ order.id }}/served">
+      <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+      <button class="ghost" type="submit">Marcar todo servido</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+
+{% if order.can_edit %}
+<section class="card">
+  <h2>Agregar plato</h2>
+  {% if order.menu.is_empty() %}
+  <p class="muted">No hay platos disponibles. Revisa el menú o los agotados.</p>
+  {% else %}
+  <form method="post" action="/app/orders/{{ order.id }}/lines" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <label class="field">
+      <span>Plato</span>
+      <select name="menu_item_id" required>
+        {% for category in order.menu %}
+        <optgroup label="{{ category.name }}">
+          {% for item in category.items %}
+          <option value="{{ item.id }}">{{ item.name }} · {{ item.price }}</option>
+          {% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="field-row">
+      <label class="field">
+        <span>Cantidad</span>
+        <input type="number" name="quantity" value="1" min="1" max="999" inputmode="numeric" required>
+      </label>
+      <label class="field grow">
+        <span>Notas</span>
+        <input name="notes" placeholder="Sin cebolla, extra queso…" autocomplete="off">
+      </label>
+    </div>
+    <button class="primary" type="submit">Agregar</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

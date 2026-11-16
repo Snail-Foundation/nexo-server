@@ -1,0 +1,17 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<section class="hero">
+  <h1>Cocina</h1>
+  <p class="muted">Comandas enviadas. La pantalla se actualiza cada 5 segundos.</p>
+</section>
+
+<div
+  id="kitchen-board"
+  hx-get="/app/kitchen/board"
+  hx-trigger="load, every 5s"
+  hx-swap="innerHTML"
+>
+  {% include "_kitchen_board.html" %}
+</div>
+{% endblock %}

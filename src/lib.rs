@@ -26,7 +26,30 @@ pub fn router(state: AppState) -> Router {
         .route("/logout", post(web::logout))
         .route("/app", get(web::app_page))
         .route("/app/tables", get(web::tables_page))
-        .route("/app/takeout", get(web::takeout_page))
+        .route("/app/tables/{id}/open", post(web::open_table))
+        .route(
+            "/app/takeout",
+            get(web::takeout_page).post(web::open_takeout),
+        )
+        .route("/app/orders/{id}", get(web::order_page))
+        .route("/app/orders/{id}/lines", post(web::add_order_line))
+        .route("/app/orders/{id}/send", post(web::send_round))
+        .route("/app/orders/{id}/ready", post(web::mark_order_ready))
+        .route("/app/orders/{id}/served", post(web::mark_order_served))
+        .route(
+            "/app/orders/{id}/lines/{line_id}/void",
+            post(web::void_line),
+        )
+        .route(
+            "/app/orders/{id}/lines/{line_id}/ready",
+            post(web::mark_line_ready),
+        )
+        .route(
+            "/app/orders/{id}/lines/{line_id}/served",
+            post(web::mark_line_served),
+        )
+        .route("/app/kitchen", get(web::kitchen_page))
+        .route("/app/kitchen/board", get(web::kitchen_board))
         .route("/app/menu", get(web::menu_page))
         .route(
             "/app/menu/items/{id}/availability",

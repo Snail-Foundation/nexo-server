@@ -25,23 +25,34 @@ and the same URLs in both cases.
 
 - Axum 0.8 + SQLx 0.9 (SQLite) + Askama 0.16 + HTMX, with mobile-first CSS and
   no Node build.
-- SQLite schema v2 with 16 tables: the v1 core (business, branch, device,
+- SQLite schema v3 with 19 tables: the v1 core (business, branch, device,
   users, auth sessions, server settings, operation log, device cursors, sync
-  anomalies, audit events) plus master-data projections for business settings,
-  menu categories, menu items, dining tables, tax rate, and payment methods.
+  anomalies, audit events), master-data projections, and the order projections
+  (`restaurant_order`, `order_line`, and `order_event`).
 - PIN login with Argon2 hashes, hashed bearer tokens, `HttpOnly` +
   `SameSite=Strict` web session cookies, and CSRF validation on logout.
 - Append-only operation log with idempotent push by operation ID and ordered
   pull by server sequence. Accepted operations are projected into the
-  master-data read model.
+  master-data and order read models; invalid transitions are recorded as
+  anomalies instead of being applied.
 - Snapshot linking: an empty server accepts a desktop snapshot and issues a
   device token; a non-empty server rejects the link with a conflict. Servers
   are never merged silently.
-- Spanish web views for tables, takeout, and menu, with an online/offline
-  banner, a live status fragment, and the sold-out toggle that writes an
-  operation to the log.
+- Spanish mobile web app for tables, takeout, order detail, rounds, kitchen,
+  and menu, with an online/offline banner, a live status fragment, and the
+  sold-out toggle.
+- Order flow: open a free table or create a takeout order, add lines and notes,
+  send the pending round, void a line with a reason, mark lines or whole orders
+  ready and served, and refresh the kitchen board with HTMX polling every five
+  seconds.
+- Role checks: `admin`, `cashier`, and `waiter` can open orders, add lines,
+  send rounds, void, and serve; `admin` and `kitchen` can mark ready; every role
+  can view the tables, takeout list, order detail, menu, and kitchen board.
+- 37 tests, including order projection folding, duplicate-table and invalid
+  transition anomalies, the full waiter/kitchen web flow, takeout creation, and
+  CSRF/role rejection.
 
-The ordering, kitchen, and cashier screens are built in the next phases.
+The cashier screen is built in the next phase.
 
 ## Routes
 
@@ -52,8 +63,19 @@ The ordering, kitchen, and cashier screens are built in the next phases.
 | `POST` | `/login` | Validates the PIN and sets the session cookie |
 | `POST` | `/logout` | Revokes the session; requires the CSRF token |
 | `GET` | `/app` | Waiter/kitchen web shell |
-| `GET` | `/app/tables` | Table grid |
-| `GET` | `/app/takeout` | Takeout order list |
+| `GET` | `/app/tables` | Table grid with open orders |
+| `POST` | `/app/tables/{id}/open` | Opens a dine-in order for a free table |
+| `GET`, `POST` | `/app/takeout` | Lists open takeout orders and creates one |
+| `GET` | `/app/orders/{id}` | Order detail with rounds and line actions |
+| `POST` | `/app/orders/{id}/lines` | Adds a pending line to the current round |
+| `POST` | `/app/orders/{id}/send` | Sends the pending round to the kitchen |
+| `POST` | `/app/orders/{id}/ready` | Marks every sent line ready |
+| `POST` | `/app/orders/{id}/served` | Marks every sent or ready line served |
+| `POST` | `/app/orders/{id}/lines/{line_id}/void` | Voids a line with a reason |
+| `POST` | `/app/orders/{id}/lines/{line_id}/ready` | Marks one sent line ready |
+| `POST` | `/app/orders/{id}/lines/{line_id}/served` | Marks one line served |
+| `GET` | `/app/kitchen` | Kitchen board |
+| `GET` | `/app/kitchen/board` | HTMX kitchen-board fragment |
 | `GET` | `/app/menu` | Menu read view with the sold-out toggle |
 | `POST` | `/app/menu/items/{id}/availability` | Marks an item available or sold out; requires the CSRF token |
 | `GET` | `/app/status` | HTMX status fragment |

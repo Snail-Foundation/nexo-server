@@ -3,11 +3,38 @@
 {% block content %}
 <section class="hero">
   <h1>Para llevar</h1>
-  <p class="muted">Pedidos de mostrador sin mesa. La toma de pedidos llega en la siguiente fase.</p>
+  <p class="muted">Crea un pedido de mostrador y envíalo a cocina.</p>
 </section>
 
-<section class="card empty">
-  <h2>No hay pedidos para llevar</h2>
-  <p class="muted">Cuando un mesonero abra un pedido, aparecerá aquí.</p>
+<section class="card">
+  <h2>Nuevo pedido</h2>
+  <form method="post" action="/app/takeout" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <label class="field grow">
+      <span>Cliente (opcional)</span>
+      <input name="customer_name" placeholder="Ej. Carla" autocomplete="off">
+    </label>
+    <button class="primary" type="submit">Crear pedido</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Pedidos abiertos</h2>
+  {% if orders.is_empty() %}
+  <p class="muted">No hay pedidos para llevar.</p>
+  {% else %}
+  <ul class="order-list">
+    {% for order in orders %}
+    <li class="order-row">
+      <div class="order-main">
+        <strong>{{ order.label }}</strong>
+        <span class="muted">{{ order.display_code }} · {{ order.status_label }} · {{ order.opened_at }}</span>
+      </div>
+      <span class="price">{{ order.total }}</span>
+      <a class="button-link" href="/app/orders/{{ order.id }}">Ver pedido</a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
 </section>
 {% endblock %}
