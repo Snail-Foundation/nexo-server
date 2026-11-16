@@ -49,6 +49,13 @@ pub async fn apply(
         OperationKind::OrderLineReady => order_line_ready(transaction, operation).await,
         OperationKind::OrderLineServed => order_line_served(transaction, operation).await,
         OperationKind::OrderCancelled => order_cancelled(transaction, operation).await,
+        OperationKind::OrderBilled => order_billed(transaction, operation).await,
+        OperationKind::SaleCreated => sale_created(transaction, operation).await,
+        OperationKind::SaleCancelled => sale_cancelled(transaction, operation).await,
+        OperationKind::PaymentRecorded => payment_recorded(transaction, operation).await,
+        OperationKind::CashSessionOpened => cash_session_opened(transaction, operation).await,
+        OperationKind::CashSessionClosed => cash_session_closed(transaction, operation).await,
+        OperationKind::CashMovementRecorded => cash_movement_recorded(transaction, operation).await,
         _ => Ok(ProjectionOutcome::Ignored),
     }
 }
@@ -1070,6 +1077,891 @@ async fn refresh_order_status(
     Ok(())
 }
 
+async fn order_billed(
+    transaction: &mut Transaction<'_, Sqlite>,
+    operation: &Operation,
+) -> Result<ProjectionOutcome, AppError> {
+    let payload = &operation.payload;
+    let order_id = operation.entity_id.to_string();
+
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM restaurant_order WHERE id = ?1")
+            .bind(&order_id)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    let Some(status) = status else {
+        return Ok(invalid("the order does not exist"));
+    };
+    if status == "billed" {
+        return Ok(ProjectionOutcome::Applied);
+    }
+    if !matches!(status.as_str(), "open" | "active" | "served") {
+        return Ok(invalid("the order cannot be billed"));
+    }
+
+    // The billing pair is commutative: `sale_created` and `order_billed` can
+    // arrive in either order because both are written in the same desktop
+    // transaction. This projection only changes the order; the sale is
+    // projected independently.
+    let billed_at_ms = integer(payload, "created_at_ms").unwrap_or(operation.created_at_ms);
+    let created_by = optional_user(transaction, payload, "created_by").await?;
+
+    sqlx::query(
+        "UPDATE restaurant_order
+         SET status = 'billed', closed_at_ms = ?2
+         WHERE id = ?1 AND status IN ('open', 'active', 'served')",
+    )
+    .bind(&order_id)
+    .bind(billed_at_ms)
+    .execute(&mut **transaction)
+    .await?;
+
+    record_order_event(
+        transaction,
+        &order_id,
+        "order_billed",
+        created_by.as_deref(),
+        operation,
+        payload.clone(),
+        billed_at_ms,
+    )
+    .await?;
+
+    Ok(ProjectionOutcome::Applied)
+}
+
+struct SaleLineInput {
+    id: String,
+    order_line_id: Option<String>,
+    menu_item_id: Option<String>,
+    description: String,
+    quantity: i64,
+    unit_price_minor: i64,
+    line_total_minor: i64,
+    currency: String,
+}
+
+struct PaymentInput {
+    id: String,
+    method_id: Option<String>,
+    amount_minor: i64,
+    currency: String,
+    base_amount_minor: i64,
+    exchange_rate_micros: Option<i64>,
+    reference: Option<String>,
+    created_at_ms: i64,
+    created_by: Option<String>,
+    device_id: String,
+}
+
+async fn sale_created(
+    transaction: &mut Transaction<'_, Sqlite>,
+    operation: &Operation,
+) -> Result<ProjectionOutcome, AppError> {
+    let payload = &operation.payload;
+    let sale_id = operation.entity_id.to_string();
+
+    let already_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sale WHERE id = ?1)")
+            .bind(&sale_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    if already_exists {
+        return Ok(ProjectionOutcome::Applied);
+    }
+
+    let Some(order_id) = text(payload, "order_id") else {
+        return Ok(invalid("sale_created requires an order"));
+    };
+    let order: Option<(String, String)> =
+        sqlx::query_as("SELECT branch_id, status FROM restaurant_order WHERE id = ?1")
+            .bind(&order_id)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    let Some((branch_id, order_status)) = order else {
+        return Ok(invalid("the order does not exist"));
+    };
+    if operation
+        .branch_id
+        .is_some_and(|operation_branch| operation_branch.to_string() != branch_id)
+    {
+        return Ok(invalid("the order belongs to another branch"));
+    }
+    if order_status == "cancelled" {
+        return Ok(invalid("a cancelled order cannot be billed"));
+    }
+
+    let conflicting_sale: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sale WHERE order_id = ?1)")
+            .bind(&order_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    if conflicting_sale {
+        return Ok(invalid("the order already has a sale"));
+    }
+
+    let Some(business_id) = business_id(transaction).await? else {
+        return Ok(invalid("sale_created requires a business"));
+    };
+    let device_id = operation.device_id.to_string();
+    if !device_exists(transaction, &device_id).await? {
+        return Ok(invalid("the device does not exist"));
+    }
+
+    let Some(number) = text(payload, "number") else {
+        return Ok(invalid("sale_created requires a sale number"));
+    };
+    let Some(subtotal_minor) = integer(payload, "subtotal_minor").filter(|value| *value >= 0)
+    else {
+        return Ok(invalid("subtotal_minor cannot be negative"));
+    };
+    let Some(tax_minor) = integer(payload, "tax_minor").filter(|value| *value >= 0) else {
+        return Ok(invalid("tax_minor cannot be negative"));
+    };
+    let Some(total_minor) = integer(payload, "total_minor").filter(|value| *value > 0) else {
+        return Ok(invalid("total_minor must be greater than zero"));
+    };
+    if subtotal_minor + tax_minor != total_minor {
+        return Ok(invalid("subtotal and IVA must add up to the total"));
+    }
+    let Some(currency) = text(payload, "currency") else {
+        return Ok(invalid("sale_created requires a currency"));
+    };
+    if currency.len() != 3 {
+        return Ok(invalid("currency must have three letters"));
+    }
+    let tax_rate_basis_points = integer(payload, "tax_rate_basis_points");
+    if tax_rate_basis_points.is_some_and(|rate| !(0..=10_000).contains(&rate)) {
+        return Ok(invalid("the IVA rate is out of range"));
+    }
+    let cash_session_id = optional_text(payload, "cash_session_id");
+    if let Some(session_id) = &cash_session_id {
+        let session_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM cash_session
+                WHERE id = ?1 AND business_id = ?2 AND branch_id = ?3
+             )",
+        )
+        .bind(session_id)
+        .bind(&business_id)
+        .bind(&branch_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !session_exists {
+            return Ok(invalid("the cash session does not exist"));
+        }
+    }
+
+    let created_by = optional_user(transaction, payload, "created_by").await?;
+    let created_at_ms = integer(payload, "created_at_ms").unwrap_or(operation.created_at_ms);
+
+    let Some(lines) = payload.get("lines").and_then(Value::as_array) else {
+        return Ok(invalid("sale_created requires its lines"));
+    };
+    let mut sale_lines = Vec::with_capacity(lines.len());
+    let mut line_total_sum: i64 = 0;
+
+    for line in lines {
+        let Some(line_id) = line.get("line_id").and_then(Value::as_str) else {
+            return Ok(invalid("each sale line requires an id"));
+        };
+        if Uuid::parse_str(line_id).is_err() {
+            return Ok(invalid("invalid sale line id"));
+        }
+        let Some(description) = line
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(invalid("each sale line requires a description"));
+        };
+        let Some(quantity) = line
+            .get("quantity")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+        else {
+            return Ok(invalid("sale line quantities must be greater than zero"));
+        };
+        let Some(unit_price_minor) = line
+            .get("unit_price_minor")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+        else {
+            return Ok(invalid("sale line prices cannot be negative"));
+        };
+        let Some(line_total_minor) = line
+            .get("line_total_minor")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+        else {
+            return Ok(invalid("sale line totals cannot be negative"));
+        };
+        if unit_price_minor.checked_mul(quantity) != Some(line_total_minor) {
+            return Ok(invalid(
+                "the sale line total does not match price times quantity",
+            ));
+        }
+        let Some(line_currency) = line.get("currency").and_then(Value::as_str) else {
+            return Ok(invalid("each sale line requires a currency"));
+        };
+        if line_currency.len() != 3 {
+            return Ok(invalid("currency must have three letters"));
+        }
+
+        let order_line_id = match line.get("order_line_id").and_then(Value::as_str) {
+            Some(line_id) => {
+                let belongs: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM order_line WHERE id = ?1 AND order_id = ?2
+                     )",
+                )
+                .bind(line_id)
+                .bind(&order_id)
+                .fetch_one(&mut **transaction)
+                .await?;
+                belongs.then(|| line_id.to_owned())
+            }
+            None => None,
+        };
+        let menu_item_id = match line.get("menu_item_id").and_then(Value::as_str) {
+            Some(item_id) => {
+                let exists: bool =
+                    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM menu_item WHERE id = ?1)")
+                        .bind(item_id)
+                        .fetch_one(&mut **transaction)
+                        .await?;
+                exists.then(|| item_id.to_owned())
+            }
+            None => None,
+        };
+
+        line_total_sum += line_total_minor;
+        sale_lines.push(SaleLineInput {
+            id: line_id.to_owned(),
+            order_line_id,
+            menu_item_id,
+            description: description.to_owned(),
+            quantity,
+            unit_price_minor,
+            line_total_minor,
+            currency: line_currency.to_owned(),
+        });
+    }
+
+    if line_total_sum != total_minor {
+        return Ok(invalid("the sale lines do not add up to the total"));
+    }
+
+    let Some(payments) = payload.get("payments").and_then(Value::as_array) else {
+        return Ok(invalid("sale_created requires its payments"));
+    };
+    let mut sale_payments = Vec::with_capacity(payments.len());
+    let mut payment_base_sum: i64 = 0;
+
+    for payment in payments {
+        let Some(payment_id) = payment.get("payment_id").and_then(Value::as_str) else {
+            return Ok(invalid("each payment requires an id"));
+        };
+        if Uuid::parse_str(payment_id).is_err() {
+            return Ok(invalid("invalid payment id"));
+        }
+        let Some(amount_minor) = payment
+            .get("amount_minor")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+        else {
+            return Ok(invalid("payment amounts must be greater than zero"));
+        };
+        let Some(payment_currency) = payment.get("currency").and_then(Value::as_str) else {
+            return Ok(invalid("each payment requires a currency"));
+        };
+        if payment_currency.len() != 3 {
+            return Ok(invalid("currency must have three letters"));
+        }
+        let Some(base_amount_minor) = payment
+            .get("base_amount_minor")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+        else {
+            return Ok(invalid("payment base amounts must be greater than zero"));
+        };
+        let exchange_rate_micros = payment.get("exchange_rate_micros").and_then(Value::as_i64);
+        if exchange_rate_micros.is_some_and(|rate| rate <= 0) {
+            return Ok(invalid("the exchange rate must be greater than zero"));
+        }
+        if payment_currency != currency && exchange_rate_micros.is_none() {
+            return Ok(invalid(
+                "secondary-currency payments require an exchange rate",
+            ));
+        }
+
+        let method_id = match payment.get("method_id").and_then(Value::as_str) {
+            Some(method_id) => {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM payment_method WHERE id = ?1)",
+                )
+                .bind(method_id)
+                .fetch_one(&mut **transaction)
+                .await?;
+                exists.then(|| method_id.to_owned())
+            }
+            None => None,
+        };
+        let payment_device_id = resolve_device(transaction, payment, operation.device_id).await?;
+        let payment_created_by = optional_user(transaction, payment, "created_by").await?;
+        let payment_created_at_ms = payment
+            .get("created_at_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or(created_at_ms);
+
+        payment_base_sum += base_amount_minor;
+        sale_payments.push(PaymentInput {
+            id: payment_id.to_owned(),
+            method_id,
+            amount_minor,
+            currency: payment_currency.to_owned(),
+            base_amount_minor,
+            exchange_rate_micros,
+            reference: payment
+                .get("reference")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            created_at_ms: payment_created_at_ms,
+            created_by: payment_created_by,
+            device_id: payment_device_id,
+        });
+    }
+
+    if payment_base_sum != total_minor {
+        return Ok(invalid("the payments do not add up to the sale total"));
+    }
+
+    sqlx::query(
+        "INSERT INTO sale (
+            id, business_id, branch_id, device_id, order_id, cash_session_id,
+            number, status, subtotal_minor, tax_minor, total_minor, currency,
+            tax_name, tax_rate_basis_points, created_at_ms, created_by
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'completed', ?8, ?9, ?10, ?11,
+            ?12, ?13, ?14, ?15
+         )",
+    )
+    .bind(&sale_id)
+    .bind(&business_id)
+    .bind(&branch_id)
+    .bind(&device_id)
+    .bind(&order_id)
+    .bind(cash_session_id.as_deref())
+    .bind(&number)
+    .bind(subtotal_minor)
+    .bind(tax_minor)
+    .bind(total_minor)
+    .bind(&currency)
+    .bind(optional_text(payload, "tax_name"))
+    .bind(tax_rate_basis_points)
+    .bind(created_at_ms)
+    .bind(created_by.as_deref())
+    .execute(&mut **transaction)
+    .await?;
+
+    for line in &sale_lines {
+        sqlx::query(
+            "INSERT INTO sale_line (
+                id, sale_id, order_line_id, menu_item_id, description,
+                quantity, unit_price_minor, line_total_minor, currency,
+                created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )
+        .bind(&line.id)
+        .bind(&sale_id)
+        .bind(line.order_line_id.as_deref())
+        .bind(line.menu_item_id.as_deref())
+        .bind(&line.description)
+        .bind(line.quantity)
+        .bind(line.unit_price_minor)
+        .bind(line.line_total_minor)
+        .bind(&line.currency)
+        .bind(created_at_ms)
+        .execute(&mut **transaction)
+        .await?;
+    }
+
+    for payment in &sale_payments {
+        sqlx::query(
+            "INSERT INTO payment (
+                id, business_id, sale_id, method_id, amount_minor, currency,
+                base_amount_minor, exchange_rate_micros, reference,
+                created_at_ms, created_by, device_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        )
+        .bind(&payment.id)
+        .bind(&business_id)
+        .bind(&sale_id)
+        .bind(payment.method_id.as_deref())
+        .bind(payment.amount_minor)
+        .bind(&payment.currency)
+        .bind(payment.base_amount_minor)
+        .bind(payment.exchange_rate_micros)
+        .bind(payment.reference.as_deref())
+        .bind(payment.created_at_ms)
+        .bind(payment.created_by.as_deref())
+        .bind(&payment.device_id)
+        .execute(&mut **transaction)
+        .await?;
+    }
+
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn sale_cancelled(
+    transaction: &mut Transaction<'_, Sqlite>,
+    operation: &Operation,
+) -> Result<ProjectionOutcome, AppError> {
+    let payload = &operation.payload;
+    let sale_id = operation.entity_id.to_string();
+
+    let sale: Option<(String, String, String)> =
+        sqlx::query_as("SELECT business_id, branch_id, status FROM sale WHERE id = ?1")
+            .bind(&sale_id)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    let Some((business_id, branch_id, status)) = sale else {
+        return Ok(invalid("the sale does not exist"));
+    };
+    if status == "cancelled" {
+        return Ok(ProjectionOutcome::Applied);
+    }
+
+    let Some(reason) = text(payload, "reason") else {
+        return Ok(invalid("sale_cancelled requires a reason"));
+    };
+    let cancelled_at_ms = integer(payload, "cancelled_at_ms").unwrap_or(operation.created_at_ms);
+    let cancelled_by = optional_user(transaction, payload, "cancelled_by").await?;
+
+    sqlx::query(
+        "UPDATE sale
+         SET status = 'cancelled', cancelled_at_ms = ?2, cancel_reason = ?3
+         WHERE id = ?1 AND status = 'completed'",
+    )
+    .bind(&sale_id)
+    .bind(cancelled_at_ms)
+    .bind(&reason)
+    .execute(&mut **transaction)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO audit_event (
+            id, business_id, branch_id, actor_user_id, device_id, action,
+            entity_type, entity_id, details, created_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'sale_cancelled', 'sale', ?6, ?7, ?8)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&business_id)
+    .bind(&branch_id)
+    .bind(cancelled_by.as_deref())
+    .bind(operation.device_id.to_string())
+    .bind(&sale_id)
+    .bind(payload.to_string())
+    .bind(cancelled_at_ms)
+    .execute(&mut **transaction)
+    .await?;
+
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn payment_recorded(
+    transaction: &mut Transaction<'_, Sqlite>,
+    operation: &Operation,
+) -> Result<ProjectionOutcome, AppError> {
+    let payload = &operation.payload;
+    let payment_id = operation.entity_id.to_string();
+
+    let already_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM payment WHERE id = ?1)")
+            .bind(&payment_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    if already_exists {
+        return Ok(ProjectionOutcome::Applied);
+    }
+
+    let Some(sale_id) = text(payload, "sale_id") else {
+        return Ok(invalid("payment_recorded requires a sale"));
+    };
+    let sale: Option<(String, String)> =
+        sqlx::query_as("SELECT business_id, currency FROM sale WHERE id = ?1")
+            .bind(&sale_id)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    let Some((business_id, sale_currency)) = sale else {
+        return Ok(invalid("the sale does not exist"));
+    };
+    let Some(amount_minor) = integer(payload, "amount_minor").filter(|value| *value > 0) else {
+        return Ok(invalid("payment amounts must be greater than zero"));
+    };
+    let Some(currency) = text(payload, "currency") else {
+        return Ok(invalid("payment_recorded requires a currency"));
+    };
+    if currency.len() != 3 {
+        return Ok(invalid("currency must have three letters"));
+    }
+    let Some(base_amount_minor) = integer(payload, "base_amount_minor").filter(|value| *value > 0)
+    else {
+        return Ok(invalid("payment base amounts must be greater than zero"));
+    };
+    let exchange_rate_micros = integer(payload, "exchange_rate_micros");
+    if exchange_rate_micros.is_some_and(|rate| rate <= 0) {
+        return Ok(invalid("the exchange rate must be greater than zero"));
+    }
+    if currency != sale_currency && exchange_rate_micros.is_none() {
+        return Ok(invalid(
+            "secondary-currency payments require an exchange rate",
+        ));
+    }
+
+    let method_id = match optional_text(payload, "method_id") {
+        Some(method_id) => {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM payment_method WHERE id = ?1)")
+                    .bind(&method_id)
+                    .fetch_one(&mut **transaction)
+                    .await?;
+            exists.then_some(method_id)
+        }
+        None => None,
+    };
+    let device_id = resolve_device(transaction, payload, operation.device_id).await?;
+    let created_by = optional_user(transaction, payload, "created_by").await?;
+    let created_at_ms = integer(payload, "created_at_ms").unwrap_or(operation.created_at_ms);
+
+    sqlx::query(
+        "INSERT INTO payment (
+            id, business_id, sale_id, method_id, amount_minor, currency,
+            base_amount_minor, exchange_rate_micros, reference,
+            created_at_ms, created_by, device_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+    )
+    .bind(&payment_id)
+    .bind(&business_id)
+    .bind(&sale_id)
+    .bind(method_id.as_deref())
+    .bind(amount_minor)
+    .bind(&currency)
+    .bind(base_amount_minor)
+    .bind(exchange_rate_micros)
+    .bind(optional_text(payload, "reference"))
+    .bind(created_at_ms)
+    .bind(created_by.as_deref())
+    .bind(&device_id)
+    .execute(&mut **transaction)
+    .await?;
+
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn cash_session_opened(
+    transaction: &mut Transaction<'_, Sqlite>,
+    operation: &Operation,
+) -> Result<ProjectionOutcome, AppError> {
+    let payload = &operation.payload;
+    let session_id = operation.entity_id.to_string();
+
+    let already_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cash_session WHERE id = ?1)")
+            .bind(&session_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    if already_exists {
+        return Ok(ProjectionOutcome::Applied);
+    }
+
+    let Some(business_id) = business_id(transaction).await? else {
+        return Ok(invalid("cash_session_opened requires a business"));
+    };
+    let branch_id = match operation.branch_id {
+        Some(branch_id) => branch_id.to_string(),
+        None => match default_branch_id(transaction, &business_id).await? {
+            Some(branch_id) => branch_id,
+            None => return Ok(invalid("the branch does not exist")),
+        },
+    };
+    let branch_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM branch WHERE id = ?1 AND business_id = ?2
+         )",
+    )
+    .bind(&branch_id)
+    .bind(&business_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !branch_exists {
+        return Ok(invalid("the branch does not exist"));
+    }
+
+    let device_id = resolve_device(transaction, payload, operation.device_id).await?;
+    if !device_exists(transaction, &device_id).await? {
+        return Ok(invalid("the device does not exist"));
+    }
+
+    let Some(opening_amount_minor) =
+        integer(payload, "opening_amount_minor").filter(|value| *value >= 0)
+    else {
+        return Ok(invalid("the opening amount cannot be negative"));
+    };
+    let Some(secondary_opening_amount_minor) =
+        integer(payload, "secondary_opening_amount_minor").filter(|value| *value >= 0)
+    else {
+        return Ok(invalid("the secondary opening amount cannot be negative"));
+    };
+    let Some(currency) = text(payload, "currency") else {
+        return Ok(invalid("cash_session_opened requires a currency"));
+    };
+    let Some(secondary_currency) = text(payload, "secondary_currency") else {
+        return Ok(invalid("cash_session_opened requires a secondary currency"));
+    };
+    if currency.len() != 3 || secondary_currency.len() != 3 {
+        return Ok(invalid("currencies must have three letters"));
+    }
+    if currency == secondary_currency {
+        return Ok(invalid("the drawers must use different currencies"));
+    }
+
+    let already_open: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM cash_session
+            WHERE branch_id = ?1 AND device_id = ?2 AND status = 'open'
+         )",
+    )
+    .bind(&branch_id)
+    .bind(&device_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if already_open {
+        return Ok(invalid("the device already has an open cash session"));
+    }
+
+    let opened_by = optional_user(transaction, payload, "opened_by").await?;
+    let opened_at_ms = integer(payload, "opened_at_ms").unwrap_or(operation.created_at_ms);
+
+    sqlx::query(
+        "INSERT INTO cash_session (
+            id, business_id, branch_id, device_id, opened_by,
+            opening_amount_minor, currency, secondary_currency,
+            secondary_opening_amount_minor, status, opened_at_ms, notes
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'open', ?10, ?11)",
+    )
+    .bind(&session_id)
+    .bind(&business_id)
+    .bind(&branch_id)
+    .bind(&device_id)
+    .bind(opened_by.as_deref())
+    .bind(opening_amount_minor)
+    .bind(&currency)
+    .bind(&secondary_currency)
+    .bind(secondary_opening_amount_minor)
+    .bind(opened_at_ms)
+    .bind(optional_text(payload, "notes"))
+    .execute(&mut **transaction)
+    .await?;
+
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn cash_session_closed(
+    transaction: &mut Transaction<'_, Sqlite>,
+    operation: &Operation,
+) -> Result<ProjectionOutcome, AppError> {
+    let payload = &operation.payload;
+    let session_id = operation.entity_id.to_string();
+
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM cash_session WHERE id = ?1")
+            .bind(&session_id)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    let Some(status) = status else {
+        return Ok(invalid("the cash session does not exist"));
+    };
+    if status == "closed" {
+        return Ok(ProjectionOutcome::Applied);
+    }
+
+    let Some(expected_amount_minor) =
+        integer(payload, "expected_amount_minor").filter(|value| *value >= 0)
+    else {
+        return Ok(invalid("the expected amount cannot be negative"));
+    };
+    let Some(counted_amount_minor) =
+        integer(payload, "counted_amount_minor").filter(|value| *value >= 0)
+    else {
+        return Ok(invalid("the counted amount cannot be negative"));
+    };
+    let difference_minor = integer(payload, "difference_minor")
+        .unwrap_or(counted_amount_minor - expected_amount_minor);
+    let secondary_expected_amount_minor =
+        integer(payload, "secondary_expected_amount_minor").unwrap_or(0);
+    let secondary_counted_amount_minor =
+        integer(payload, "secondary_counted_amount_minor").unwrap_or(0);
+    let secondary_difference_minor = integer(payload, "secondary_difference_minor")
+        .unwrap_or(secondary_counted_amount_minor - secondary_expected_amount_minor);
+    let closed_at_ms = integer(payload, "closed_at_ms").unwrap_or(operation.created_at_ms);
+    let closed_by = optional_user(transaction, payload, "closed_by").await?;
+
+    sqlx::query(
+        "UPDATE cash_session
+         SET status = 'closed',
+             closed_by = ?2,
+             closed_at_ms = ?3,
+             expected_amount_minor = ?4,
+             secondary_expected_amount_minor = ?5,
+             counted_amount_minor = ?6,
+             secondary_counted_amount_minor = ?7,
+             difference_minor = ?8,
+             secondary_difference_minor = ?9,
+             notes = COALESCE(?10, notes)
+         WHERE id = ?1 AND status = 'open'",
+    )
+    .bind(&session_id)
+    .bind(closed_by.as_deref())
+    .bind(closed_at_ms)
+    .bind(expected_amount_minor)
+    .bind(secondary_expected_amount_minor)
+    .bind(counted_amount_minor)
+    .bind(secondary_counted_amount_minor)
+    .bind(difference_minor)
+    .bind(secondary_difference_minor)
+    .bind(optional_text(payload, "notes"))
+    .execute(&mut **transaction)
+    .await?;
+
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn cash_movement_recorded(
+    transaction: &mut Transaction<'_, Sqlite>,
+    operation: &Operation,
+) -> Result<ProjectionOutcome, AppError> {
+    let payload = &operation.payload;
+    let movement_id = operation.entity_id.to_string();
+
+    let already_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cash_movement WHERE id = ?1)")
+            .bind(&movement_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    if already_exists {
+        return Ok(ProjectionOutcome::Applied);
+    }
+
+    let Some(session_id) = text(payload, "cash_session_id") else {
+        return Ok(invalid("cash_movement_recorded requires a cash session"));
+    };
+    let business_id: Option<String> =
+        sqlx::query_scalar("SELECT business_id FROM cash_session WHERE id = ?1")
+            .bind(&session_id)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    let Some(business_id) = business_id else {
+        return Ok(invalid("the cash session does not exist"));
+    };
+    let Some(kind) = text(payload, "kind") else {
+        return Ok(invalid("cash_movement_recorded requires a kind"));
+    };
+    if !matches!(
+        kind.as_str(),
+        "in" | "out" | "sale" | "refund" | "expense" | "withdrawal" | "deposit"
+    ) {
+        return Ok(invalid("invalid cash movement kind"));
+    }
+    let Some(amount_minor) = integer(payload, "amount_minor").filter(|value| *value > 0) else {
+        return Ok(invalid("cash movement amounts must be greater than zero"));
+    };
+    let Some(currency) = text(payload, "currency") else {
+        return Ok(invalid("cash_movement_recorded requires a currency"));
+    };
+    if currency.len() != 3 {
+        return Ok(invalid("currency must have three letters"));
+    }
+
+    let device_id = resolve_device(transaction, payload, operation.device_id).await?;
+    if !device_exists(transaction, &device_id).await? {
+        return Ok(invalid("the device does not exist"));
+    }
+    let created_by = optional_user(transaction, payload, "created_by").await?;
+    let created_at_ms = integer(payload, "created_at_ms").unwrap_or(operation.created_at_ms);
+
+    sqlx::query(
+        "INSERT INTO cash_movement (
+            id, business_id, cash_session_id, kind, amount_minor, currency,
+            reason, reference_type, reference_id, created_at_ms, created_by,
+            device_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+    )
+    .bind(&movement_id)
+    .bind(&business_id)
+    .bind(&session_id)
+    .bind(&kind)
+    .bind(amount_minor)
+    .bind(&currency)
+    .bind(optional_text(payload, "reason"))
+    .bind(optional_text(payload, "reference_type"))
+    .bind(optional_text(payload, "reference_id"))
+    .bind(created_at_ms)
+    .bind(created_by.as_deref())
+    .bind(&device_id)
+    .execute(&mut **transaction)
+    .await?;
+
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn device_exists(
+    transaction: &mut Transaction<'_, Sqlite>,
+    device_id: &str,
+) -> Result<bool, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM device WHERE id = ?1)")
+            .bind(device_id)
+            .fetch_one(&mut **transaction)
+            .await?,
+    )
+}
+
+/// Returns the device referenced by the payload when it exists, otherwise the
+/// device that authored the operation.
+async fn resolve_device(
+    transaction: &mut Transaction<'_, Sqlite>,
+    payload: &Value,
+    fallback: nexo_core::DeviceId,
+) -> Result<String, AppError> {
+    if let Some(device_id) = optional_text(payload, "device_id")
+        && device_exists(transaction, &device_id).await?
+    {
+        return Ok(device_id);
+    }
+
+    Ok(fallback.to_string())
+}
+
+async fn optional_user(
+    transaction: &mut Transaction<'_, Sqlite>,
+    payload: &Value,
+    field: &str,
+) -> Result<Option<String>, AppError> {
+    let Some(user_id) = optional_text(payload, field) else {
+        return Ok(None);
+    };
+
+    if user_exists(transaction, &user_id).await? {
+        Ok(Some(user_id))
+    } else {
+        Ok(None)
+    }
+}
+
 async fn record_order_event(
     transaction: &mut Transaction<'_, Sqlite>,
     order_id: &str,
@@ -1935,6 +2827,315 @@ mod tests {
             .unwrap();
 
         assert_eq!(items, 0);
+        assert_eq!(anomalies, 1);
+    }
+
+    #[tokio::test]
+    async fn billing_folds_sale_payments_and_cash_in_any_pair_order() {
+        let state = test_support::state().await;
+        let (device_id, branch_id, table_id, item_id, user_id) = linked_order_context(&state).await;
+        let method_id: String = sqlx::query_scalar("SELECT id FROM payment_method LIMIT 1")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        let order_id = Uuid::now_v7();
+        let line_id = Uuid::now_v7();
+        let session_id = Uuid::now_v7();
+        let sale_id = Uuid::now_v7();
+        let payment_id = Uuid::now_v7();
+        let movement_id = Uuid::now_v7();
+        let at = 1_700_000_000_000;
+
+        let billing_operation = |kind, entity_id, payload| {
+            Operation::new(device_id, Some(branch_id), kind, entity_id, payload, at)
+        };
+
+        sync::push(
+            &state.pool,
+            vec![
+                billing_operation(
+                    OperationKind::OrderOpened,
+                    order_id,
+                    json!({
+                        "order_type": "dine_in",
+                        "table_id": table_id,
+                        "display_code": "M-001",
+                        "opened_by": user_id,
+                        "opened_at_ms": at,
+                    }),
+                ),
+                billing_operation(
+                    OperationKind::OrderLineAdded,
+                    line_id,
+                    json!({
+                        "order_id": order_id.to_string(),
+                        "menu_item_id": item_id,
+                        "description": "Arepa",
+                        "quantity": 2,
+                        "unit_price_minor": 250,
+                        "line_total_minor": 500,
+                        "currency": "USD",
+                        "round_number": 1,
+                        "created_by": user_id,
+                        "created_at_ms": at + 1,
+                    }),
+                ),
+                billing_operation(
+                    OperationKind::CashSessionOpened,
+                    session_id,
+                    json!({
+                        "cash_session_id": session_id.to_string(),
+                        "branch_id": branch_id.to_string(),
+                        "device_id": device_id.to_string(),
+                        "opened_by": user_id,
+                        "opening_amount_minor": 0,
+                        "currency": "USD",
+                        "secondary_currency": "VES",
+                        "secondary_opening_amount_minor": 0,
+                        "opened_at_ms": at + 2,
+                    }),
+                ),
+                // `order_billed` arrives before `sale_created`: the pair is
+                // commutative and both orders must produce the same state.
+                billing_operation(
+                    OperationKind::OrderBilled,
+                    order_id,
+                    json!({
+                        "sale_id": sale_id.to_string(),
+                        "number": "V-0001",
+                        "subtotal_minor": 500,
+                        "tax_minor": 0,
+                        "total_minor": 500,
+                        "currency": "USD",
+                        "cash_session_id": session_id.to_string(),
+                        "created_by": user_id,
+                        "created_at_ms": at + 3,
+                    }),
+                ),
+                billing_operation(
+                    OperationKind::SaleCreated,
+                    sale_id,
+                    json!({
+                        "order_id": order_id.to_string(),
+                        "number": "V-0001",
+                        "subtotal_minor": 500,
+                        "tax_minor": 0,
+                        "total_minor": 500,
+                        "currency": "USD",
+                        "tax_name": null,
+                        "tax_rate_basis_points": null,
+                        "cash_session_id": session_id.to_string(),
+                        "lines": [{
+                            "line_id": line_id.to_string(),
+                            "order_line_id": line_id.to_string(),
+                            "menu_item_id": item_id,
+                            "description": "Arepa",
+                            "quantity": 2,
+                            "unit_price_minor": 250,
+                            "line_total_minor": 500,
+                            "currency": "USD",
+                        }],
+                        "payments": [{
+                            "payment_id": payment_id.to_string(),
+                            "method_id": method_id,
+                            "amount_minor": 500,
+                            "currency": "USD",
+                            "base_amount_minor": 500,
+                            "exchange_rate_micros": null,
+                            "reference": null,
+                            "created_at_ms": at + 3,
+                            "created_by": user_id,
+                            "device_id": device_id.to_string(),
+                        }],
+                        "created_by": user_id,
+                        "created_at_ms": at + 3,
+                    }),
+                ),
+                billing_operation(
+                    OperationKind::CashMovementRecorded,
+                    movement_id,
+                    json!({
+                        "cash_movement_id": movement_id.to_string(),
+                        "cash_session_id": session_id.to_string(),
+                        "kind": "sale",
+                        "amount_minor": 500,
+                        "currency": "USD",
+                        "reference_type": "sale",
+                        "reference_id": sale_id.to_string(),
+                        "created_by": user_id,
+                        "created_at_ms": at + 4,
+                    }),
+                ),
+                billing_operation(
+                    OperationKind::CashSessionClosed,
+                    session_id,
+                    json!({
+                        "cash_session_id": session_id.to_string(),
+                        "closed_by": user_id,
+                        "expected_amount_minor": 500,
+                        "counted_amount_minor": 500,
+                        "difference_minor": 0,
+                        "secondary_expected_amount_minor": 0,
+                        "secondary_counted_amount_minor": 0,
+                        "secondary_difference_minor": 0,
+                        "closed_at_ms": at + 5,
+                    }),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let order_status: String =
+            sqlx::query_scalar("SELECT status FROM restaurant_order WHERE id = ?1")
+                .bind(order_id.to_string())
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(order_status, "billed");
+
+        let sale: (String, i64, i64, String) =
+            sqlx::query_as("SELECT number, total_minor, tax_minor, status FROM sale WHERE id = ?1")
+                .bind(sale_id.to_string())
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(sale, ("V-0001".to_owned(), 500, 0, "completed".to_owned()));
+
+        let lines: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sale_line WHERE sale_id = ?1")
+            .bind(sale_id.to_string())
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        let payments: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payment WHERE sale_id = ?1")
+            .bind(sale_id.to_string())
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(lines, 1);
+        assert_eq!(payments, 1);
+
+        let session: (String, i64, i64, i64) = sqlx::query_as(
+            "SELECT status, expected_amount_minor, counted_amount_minor, difference_minor
+             FROM cash_session WHERE id = ?1",
+        )
+        .bind(session_id.to_string())
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(session, ("closed".to_owned(), 500, 500, 0));
+
+        let movement_kind: String =
+            sqlx::query_scalar("SELECT kind FROM cash_movement WHERE id = ?1")
+                .bind(movement_id.to_string())
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(movement_kind, "sale");
+
+        let billed_events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM order_event WHERE order_id = ?1 AND kind = 'order_billed'",
+        )
+        .bind(order_id.to_string())
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(billed_events, 1);
+
+        let anomalies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_anomaly")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(anomalies, 0);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_order_cannot_be_billed() {
+        let state = test_support::state().await;
+        let (device_id, branch_id, table_id, _, user_id) = linked_order_context(&state).await;
+        let method_id: String = sqlx::query_scalar("SELECT id FROM payment_method LIMIT 1")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        let order_id = Uuid::now_v7();
+        let sale_id = Uuid::now_v7();
+        let payment_id = Uuid::now_v7();
+        let at = 1_700_000_000_000;
+
+        let billing_operation = |kind, entity_id, payload| {
+            Operation::new(device_id, Some(branch_id), kind, entity_id, payload, at)
+        };
+
+        sync::push(
+            &state.pool,
+            vec![
+                billing_operation(
+                    OperationKind::OrderOpened,
+                    order_id,
+                    json!({
+                        "order_type": "dine_in",
+                        "table_id": table_id,
+                        "display_code": "M-001",
+                        "opened_by": user_id,
+                        "opened_at_ms": at,
+                    }),
+                ),
+                billing_operation(
+                    OperationKind::OrderCancelled,
+                    order_id,
+                    json!({
+                        "reason": "Cliente se retiró",
+                        "cancelled_by": user_id,
+                        "cancelled_at_ms": at + 1,
+                    }),
+                ),
+                billing_operation(
+                    OperationKind::SaleCreated,
+                    sale_id,
+                    json!({
+                        "order_id": order_id.to_string(),
+                        "number": "V-0001",
+                        "subtotal_minor": 500,
+                        "tax_minor": 0,
+                        "total_minor": 500,
+                        "currency": "USD",
+                        "lines": [{
+                            "line_id": Uuid::now_v7().to_string(),
+                            "description": "Arepa",
+                            "quantity": 2,
+                            "unit_price_minor": 250,
+                            "line_total_minor": 500,
+                            "currency": "USD",
+                        }],
+                        "payments": [{
+                            "payment_id": payment_id.to_string(),
+                            "method_id": method_id,
+                            "amount_minor": 500,
+                            "currency": "USD",
+                            "base_amount_minor": 500,
+                            "created_at_ms": at + 2,
+                            "created_by": user_id,
+                            "device_id": device_id.to_string(),
+                        }],
+                        "created_by": user_id,
+                        "created_at_ms": at + 2,
+                    }),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let sales: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sale")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        let anomalies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_anomaly")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(sales, 0);
         assert_eq!(anomalies, 1);
     }
 }

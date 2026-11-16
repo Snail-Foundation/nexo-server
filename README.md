@@ -25,16 +25,18 @@ and the same URLs in both cases.
 
 - Axum 0.8 + SQLx 0.9 (SQLite) + Askama 0.16 + HTMX, with mobile-first CSS and
   no Node build.
-- SQLite schema v3 with 19 tables: the v1 core (business, branch, device,
+- SQLite schema v4 with 24 tables: the v1 core (business, branch, device,
   users, auth sessions, server settings, operation log, device cursors, sync
-  anomalies, audit events), master-data projections, and the order projections
-  (`restaurant_order`, `order_line`, and `order_event`).
+  anomalies, audit events), master-data projections, the order projections
+  (`restaurant_order`, `order_line`, and `order_event`), and the billing
+  projections (`sale`, `sale_line`, `payment`, `cash_session`, and
+  `cash_movement`).
 - PIN login with Argon2 hashes, hashed bearer tokens, `HttpOnly` +
   `SameSite=Strict` web session cookies, and CSRF validation on logout.
 - Append-only operation log with idempotent push by operation ID and ordered
   pull by server sequence. Accepted operations are projected into the
-  master-data and order read models; invalid transitions are recorded as
-  anomalies instead of being applied.
+  master-data, order, sale, payment, and cash read models; invalid transitions
+  are recorded as anomalies instead of being applied.
 - Snapshot linking: an empty server accepts a desktop snapshot and issues a
   device token; a non-empty server rejects the link with a conflict. Servers
   are never merged silently.
@@ -45,14 +47,22 @@ and the same URLs in both cases.
   send the pending round, void a line with a reason, mark lines or whole orders
   ready and served, and refresh the kitchen board with HTMX polling every five
   seconds.
+- Billing projections: `sale_created` inserts the sale, its lines, and its
+  payments; `order_billed` is commutative and transitions the order without
+  requiring the sale row; `payment_recorded`, `cash_session_opened`,
+  `cash_movement_recorded`, and `cash_session_closed` are idempotent; and
+  `sale_cancelled` records an audit event. Billed orders appear as "Cobrado" in
+  the web app.
 - Role checks: `admin`, `cashier`, and `waiter` can open orders, add lines,
   send rounds, void, and serve; `admin` and `kitchen` can mark ready; every role
   can view the tables, takeout list, order detail, menu, and kitchen board.
-- 37 tests, including order projection folding, duplicate-table and invalid
-  transition anomalies, the full waiter/kitchen web flow, takeout creation, and
-  CSRF/role rejection.
+- 39 tests, including order and billing projection folding, commutative
+  `order_billed`, rejected billing of a cancelled order, duplicate-table and
+  invalid transition anomalies, the full waiter/kitchen web flow, takeout
+  creation, and CSRF/role rejection.
 
-The cashier screen is built in the next phase.
+Cashier billing remains desktop-first: the web app displays billed orders but
+does not charge them.
 
 ## Routes
 
