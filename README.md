@@ -45,7 +45,11 @@ and the same URLs in both cases.
   are never merged silently.
 - Spanish mobile web app for tables, takeout, order detail, rounds, kitchen,
   and menu, with an online/offline banner, a live status fragment, and the
-  sold-out toggle.
+  sold-out toggle. The shell fits all five tabs at 360 px, uses 48 px tap
+  targets, marks the active tab with `aria-current="page"`, and returns to the
+  matching list (`Mesas` or `Para llevar`) from an order. A web manifest,
+  SVG/PNG icons, and Apple touch metadata support an HTTP home-screen shortcut;
+  full PWA installation still requires HTTPS.
 - Order flow: open a free table or create a takeout order, add lines and notes,
   send the pending round, void a line with a reason, mark lines or whole orders
   ready and served, and refresh the kitchen board with HTMX polling every five
@@ -62,7 +66,7 @@ and the same URLs in both cases.
   `admin`/`cashier`/`waiter`; the kitchen board is for `admin`/`kitchen`; the
   menu and sold-out toggle are available to every role. The navigation hides
   modules the current role cannot use.
-- 50 tests, including order and billing projection folding, commutative
+- 51 tests, including order and billing projection folding, commutative
   `order_billed`, rejected billing of a cancelled order, duplicate-table and
   invalid transition anomalies, the full waiter/kitchen web flow, takeout
   creation, login throttling across web and API, inactive-user session
@@ -99,6 +103,11 @@ does not charge them.
 | `GET` | `/app/status` | HTMX status fragment |
 | `GET` | `/static/app.css` | Embedded stylesheet |
 | `GET` | `/static/htmx.min.js` | Embedded HTMX 2.0.4 |
+| `GET` | `/static/manifest.webmanifest` | Web app manifest for the home-screen shortcut |
+| `GET` | `/static/icon.svg` | Scalable application icon |
+| `GET` | `/static/icon-192.png` | 192 px application icon |
+| `GET` | `/static/icon-512.png` | 512 px application icon |
+| `GET` | `/static/apple-touch-icon.png` | Apple touch icon |
 | `GET` | `/api/health` | Liveness and database check |
 | `POST` | `/api/login` | Exchanges a PIN for an API bearer token |
 | `POST` | `/api/link` | Imports a desktop snapshot into an empty server and issues a device token |
@@ -139,6 +148,116 @@ after the server comes back.
 The seed creates one business, a default branch named `Principal`, a server
 device, and an `Admin` user with the `admin` role. Without `NEXO_ADMIN_PIN` and
 with an empty database, web and API login stay disabled.
+
+## Deployment
+
+The MVP is deployed as a release binary on the cashier PC or a small mini-PC,
+not as a container or an OS package. Build it on the target machine:
+
+```sh
+cargo build --release
+```
+
+The binary is `target/release/nexo-server`. Static assets (CSS, HTMX, manifest,
+and icons) are embedded, so no Node build or asset directory is needed at
+runtime.
+
+### Dedicated service (Linux example)
+
+Create a system user and data directory:
+
+```sh
+sudo useradd --system --create-home \
+  --home-dir /var/lib/nexo-server \
+  --shell /usr/sbin/nologin nexo
+sudo install -m 755 target/release/nexo-server /usr/local/bin/nexo-server
+sudo install -d -o nexo -g nexo /var/lib/nexo-server
+```
+
+Create `/etc/systemd/system/nexo-server.service`:
+
+```ini
+[Unit]
+Description=Nexo Restaurantes local server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexo
+Group=nexo
+WorkingDirectory=/var/lib/nexo-server
+Environment=NEXO_SERVER_DB=sqlite:///var/lib/nexo-server/nexo-server.db?mode=rwc
+Environment=NEXO_SERVER_ADDR=0.0.0.0:8080
+Environment=NEXO_SESSION_HOURS=12
+# First start only, then remove this line:
+# Environment=NEXO_ADMIN_PIN=1234
+ExecStart=/usr/local/bin/nexo-server
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start it:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now nexo-server
+sudo systemctl status nexo-server
+sudo journalctl -u nexo-server -f
+```
+
+The first start with `NEXO_ADMIN_PIN` seeds `Admin`. Link the desktop once,
+then remove the variable from the unit. Startup applies pending migrations
+automatically.
+
+### Network
+
+- Give the server machine a fixed IP address or a DHCP reservation.
+- Allow TCP 8080 only from the restaurant LAN. For example, with UFW:
+
+  ```sh
+  sudo ufw allow from 192.168.1.0/24 to any port 8080 proto tcp
+  ```
+
+- Do not forward the port on the router or expose the server to the internet.
+  The MVP has no TLS or reverse proxy; local HTTPS is deferred.
+- Verify from another device with
+  `curl http://<server-ip>:8080/api/health`.
+
+### Updating
+
+1. Back up the server database.
+2. Stop the service.
+3. Replace the binary.
+4. Start the service and check `/api/health`.
+
+Migrations run at startup. If a migration fails, the service does not accept
+requests; restore the backup before retrying.
+
+## Backup and restore
+
+The server database holds the operation log, projections, users, sessions, and
+device tokens. Back it up together with the desktop database; the desktop does
+not re-push operations that were already sent. See
+[`USER_GUIDE.md`](../USER_GUIDE.md#11-backup-and-restore) for the full routine.
+
+With the service running, use SQLite's online backup:
+
+```sh
+sudo mkdir -p /var/backups/nexo-server
+sudo sqlite3 /var/lib/nexo-server/nexo-server.db \
+  ".backup '/var/backups/nexo-server/server-$(date +%F).db'"
+```
+
+With the service stopped, a file copy is safe. Also back up the systemd unit
+and any environment file. To restore, stop the service, move the current
+database aside, copy the backup into place, remove stale `-wal` and `-shm`
+files, and start the service. Never merge two server databases by hand.
 
 ## Development
 
