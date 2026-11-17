@@ -157,6 +157,30 @@ NEXO_ADMIN_PIN=1234 cargo run
 Then open `http://localhost:8080` on the same machine or
 `http://<server-ip>:8080` from a phone on the same network.
 
+## Cross-project integration check
+
+`scripts/restaurant-e2e.sh` starts a throwaway server, runs
+`nexo-restaurant/examples/server_e2e.rs` against it, and verifies the whole
+slice:
+
+- The desktop creates an installation, menu, table, cash session, dine-in
+  order, and cash sale, then links and syncs with the server.
+- The server projects the order as billed, the sale and payment, the open cash
+  session, and the sale cash movement without synchronization anomalies.
+- The waiter web app logs in with the desktop admin PIN and shows the billed
+  order as `Cobrado`.
+
+Run it from this checkout with `nexo-restaurant` next to it:
+
+```sh
+./scripts/restaurant-e2e.sh
+```
+
+It needs `curl`, `jq`, and `sqlite3`. Set `NEXO_RESTAURANT_DIR` if the desktop
+is elsewhere, `NEXO_E2E_PORT` to change the port, or `NEXO_E2E_KEEP=1` to keep
+the temporary databases. The projects stay independent: the harness only uses
+the public HTTP protocol and reads both SQLite databases for assertions.
+
 ## Security notes
 
 - PINs are hashed with Argon2; tokens are stored as SHA-256 hashes, never in
