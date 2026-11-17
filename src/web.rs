@@ -307,6 +307,17 @@ pub async fn login_page(
     Ok(Html(html).into_response())
 }
 
+/// Formats the remaining lock for the Spanish login page.
+fn retry_after_label(seconds: i64) -> String {
+    if seconds <= 60 {
+        "1 minuto".to_owned()
+    } else if seconds < 3_600 {
+        format!("{} minutos", (seconds + 59) / 60)
+    } else {
+        "1 hora".to_owned()
+    }
+}
+
 /// Validates the PIN, creates a web session, and redirects to the app.
 pub async fn login_submit(
     State(state): State<AppState>,
@@ -332,15 +343,20 @@ pub async fn login_submit(
 
             return Ok((StatusCode::UNAUTHORIZED, Html(html)).into_response());
         }
-        Err(AppError::TooManyAttempts) => {
+        Err(AppError::TooManyAttempts {
+            retry_after_seconds,
+        }) => {
             let html = LoginTemplate {
-                error: "Demasiados intentos. Espera 15 minutos e intenta de nuevo.".to_owned(),
+                error: format!(
+                    "Demasiados intentos. Espera {} e intenta de nuevo.",
+                    retry_after_label(retry_after_seconds)
+                ),
             }
             .render()?;
             let mut response = (StatusCode::TOO_MANY_REQUESTS, Html(html)).into_response();
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("900"));
+            let value = HeaderValue::from_str(&retry_after_seconds.to_string())
+                .unwrap_or_else(|_| HeaderValue::from_static("60"));
+            response.headers_mut().insert(header::RETRY_AFTER, value);
 
             return Ok(response);
         }
@@ -2278,9 +2294,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "900");
+        let retry_after: i64 = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=auth::LOGIN_FIRST_LOCK_MS / 1000).contains(&retry_after));
         let body = body_text(response).await;
         assert!(body.contains("Demasiados intentos"));
+        assert!(body.contains("1 minuto"));
     }
 
     #[tokio::test]

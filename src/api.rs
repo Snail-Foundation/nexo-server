@@ -256,7 +256,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "900");
+        let retry_after: i64 = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=auth::LOGIN_FIRST_LOCK_MS / 1000).contains(&retry_after));
         let value = json_body(response).await;
         assert_eq!(value["error"], "too many attempts");
     }

@@ -16,14 +16,34 @@ use crate::time::now_ms;
 /// Name of the web session cookie.
 pub const SESSION_COOKIE: &str = "nexo_session";
 
-/// Failed PIN attempts allowed inside one throttle window.
+/// Failed PIN attempts allowed before the first lock.
 pub const LOGIN_MAX_FAILURES: i64 = 5;
 
-/// Duration of the fixed failure-counting window.
-pub const LOGIN_WINDOW_MS: i64 = 15 * 60 * 1000;
+/// Duration of the failure-counting window. It is long enough for the short
+/// first locks to expire without resetting the escalation.
+pub const LOGIN_WINDOW_MS: i64 = 60 * 60 * 1000;
 
-/// How long a user stays locked after reaching the failure threshold.
-pub const LOGIN_LOCK_MS: i64 = 15 * 60 * 1000;
+/// First lock: five failures.
+pub const LOGIN_FIRST_LOCK_MS: i64 = 60 * 1000;
+
+/// Second lock: ten failures.
+pub const LOGIN_SECOND_LOCK_MS: i64 = 5 * 60 * 1000;
+
+/// Third lock: fifteen failures.
+pub const LOGIN_THIRD_LOCK_MS: i64 = 15 * 60 * 1000;
+
+/// Longest lock: twenty or more failures.
+pub const LOGIN_FOURTH_LOCK_MS: i64 = 60 * 60 * 1000;
+
+/// Returns the progressive lock duration for a failure count.
+fn login_lock_ms(failure_count: i64) -> i64 {
+    match failure_count / LOGIN_MAX_FAILURES {
+        0 | 1 => LOGIN_FIRST_LOCK_MS,
+        2 => LOGIN_SECOND_LOCK_MS,
+        3 => LOGIN_THIRD_LOCK_MS,
+        _ => LOGIN_FOURTH_LOCK_MS,
+    }
+}
 
 /// Throttle rows older than this are pruned on the next failed attempt.
 const LOGIN_THROTTLE_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
@@ -346,8 +366,12 @@ async fn ensure_login_allowed_at(
     .fetch_optional(pool)
     .await?;
 
-    if locked_until_ms.flatten().is_some_and(|locked| locked > now) {
-        return Err(AppError::TooManyAttempts);
+    if let Some(locked_until) = locked_until_ms.flatten().filter(|locked| *locked > now) {
+        let retry_after_seconds = ((locked_until - now + 999) / 1_000).max(1);
+
+        return Err(AppError::TooManyAttempts {
+            retry_after_seconds,
+        });
     }
 
     Ok(())
@@ -391,7 +415,8 @@ async fn record_login_failure_at(
     } else {
         (failure_count + 1, window_started_at_ms)
     };
-    let locked_until_ms = (failure_count >= LOGIN_MAX_FAILURES).then_some(now + LOGIN_LOCK_MS);
+    let lock_due = failure_count >= LOGIN_MAX_FAILURES && failure_count % LOGIN_MAX_FAILURES == 0;
+    let locked_until_ms = lock_due.then_some(now + login_lock_ms(failure_count));
 
     sqlx::query(
         "INSERT INTO login_throttle (
@@ -863,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_logins_lock_the_account_until_the_window_expires() {
+    async fn failed_logins_lock_the_account_until_the_first_lock_expires() {
         let pool = pool_with_admin().await;
         let key = throttle_key("Admin");
         let start = now_ms();
@@ -874,20 +899,72 @@ mod tests {
 
         assert!(matches!(
             ensure_login_allowed_at(&pool, &key, start + 1).await,
-            Err(AppError::TooManyAttempts)
+            Err(AppError::TooManyAttempts {
+                retry_after_seconds: 60
+            })
         ));
 
         // The correct PIN is rejected too while the account is locked.
         assert!(matches!(
             authenticate_throttled(&pool, "Admin", "1234").await,
-            Err(AppError::TooManyAttempts)
+            Err(AppError::TooManyAttempts { .. })
         ));
 
         assert!(
-            ensure_login_allowed_at(&pool, &key, start + LOGIN_LOCK_MS + 1)
+            ensure_login_allowed_at(&pool, &key, start + LOGIN_FIRST_LOCK_MS + 1)
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn retry_after_reports_the_remaining_lock() {
+        let pool = pool_with_admin().await;
+        let key = throttle_key("Admin");
+        let start = now_ms();
+
+        for _ in 0..LOGIN_MAX_FAILURES {
+            record_login_failure_at(&pool, &key, start).await.unwrap();
+        }
+
+        let Err(AppError::TooManyAttempts {
+            retry_after_seconds,
+        }) = ensure_login_allowed_at(&pool, &key, start + 30_000).await
+        else {
+            panic!("expected a lock");
+        };
+
+        assert_eq!(retry_after_seconds, 30);
+    }
+
+    #[tokio::test]
+    async fn repeated_failures_escalate_the_lock_duration() {
+        let pool = pool_with_admin().await;
+        let key = throttle_key("Admin");
+        let mut now = now_ms();
+        let mut expected = [
+            LOGIN_FIRST_LOCK_MS,
+            LOGIN_SECOND_LOCK_MS,
+            LOGIN_THIRD_LOCK_MS,
+            LOGIN_FOURTH_LOCK_MS,
+        ];
+
+        for lock_ms in expected.iter_mut() {
+            for _ in 0..LOGIN_MAX_FAILURES {
+                record_login_failure_at(&pool, &key, now).await.unwrap();
+            }
+
+            let locked: Option<i64> = sqlx::query_scalar(
+                "SELECT locked_until_ms FROM login_throttle WHERE key_hash = ?1",
+            )
+            .bind(&key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(locked, Some(now + *lock_ms));
+
+            now += *lock_ms + 1;
+        }
     }
 
     #[tokio::test]

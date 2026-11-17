@@ -766,6 +766,6 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(AppError::TooManyAttempts)));
+        assert!(matches!(result, Err(AppError::TooManyAttempts { .. })));
     }
 }

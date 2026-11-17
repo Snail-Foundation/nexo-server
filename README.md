@@ -305,10 +305,12 @@ the public HTTP protocol and reads both SQLite databases for assertions.
 - PINs are hashed with Argon2; tokens are stored as SHA-256 hashes, never in
   plain text.
 - Failed PIN attempts are counted per normalized user name in a persistent
-  fixed window. After 5 failures in 15 minutes the user is locked for 15
-  minutes. Web login, API login, and snapshot linking share the same counter,
-  so switching channels does not reset it. The web login page and API return
-  `429 Too Many Requests` with `Retry-After`.
+  one-hour window shared by web login, API login, and snapshot linking, so
+  switching channels does not reset it. Locks are progressive and applied at
+  each multiple of five failures: 5 failures lock for 1 minute, 10 for 5
+  minutes, 15 for 15 minutes, and 20 or more for 1 hour. A successful login
+  clears the counter. The web login page and API return `429 Too Many
+  Requests` with the actual remaining seconds in `Retry-After`.
 - Web sessions use `HttpOnly` and `SameSite=Strict` cookies. Logout requires the
   per-session CSRF token, and CSRF tokens are compared in constant time.
 - Sessions are checked against the user's active flag on every request, so

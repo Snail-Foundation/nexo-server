@@ -35,7 +35,7 @@ pub enum AppError {
     Forbidden,
 
     #[error("too many attempts")]
-    TooManyAttempts,
+    TooManyAttempts { retry_after_seconds: i64 },
 
     #[error("not found")]
     NotFound,
@@ -55,7 +55,7 @@ impl IntoResponse for AppError {
         let (status, message) = match &self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_owned()),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_owned()),
-            Self::TooManyAttempts => (
+            Self::TooManyAttempts { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "too many attempts".to_owned(),
             ),
@@ -80,10 +80,12 @@ impl IntoResponse for AppError {
 
         let mut response = (status, Json(json!({ "error": message }))).into_response();
 
-        if matches!(&self, Self::TooManyAttempts) {
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("900"));
+        if let Self::TooManyAttempts {
+            retry_after_seconds,
+        } = &self
+            && let Ok(value) = HeaderValue::try_from(retry_after_seconds.to_string())
+        {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
         }
 
         response
