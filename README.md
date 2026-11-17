@@ -62,11 +62,12 @@ and the same URLs in both cases.
   `admin`/`cashier`/`waiter`; the kitchen board is for `admin`/`kitchen`; the
   menu and sold-out toggle are available to every role. The navigation hides
   modules the current role cannot use.
-- 49 tests, including order and billing projection folding, commutative
+- 50 tests, including order and billing projection folding, commutative
   `order_billed`, rejected billing of a cancelled order, duplicate-table and
   invalid transition anomalies, the full waiter/kitchen web flow, takeout
   creation, login throttling across web and API, inactive-user session
-  rejection, page permissions, and CSRF/role rejection.
+  rejection, page permissions, CSRF/role rejection, and data/session/device
+  persistence across a server restart.
 
 Cashier billing remains desktop-first: the web app displays billed orders but
 does not charge them.
@@ -115,6 +116,15 @@ last sequence.
 After linking, the desktop admin replaces the seed `Admin` user, so the web app
 logs in with the desktop credentials. The device token authenticates push and
 pull requests, and the server only accepts operations authored by that device.
+
+## Restart behavior
+
+The SQLite database stores the operation log, projections, auth sessions, and
+device tokens, so they survive a server restart. Startup applies any pending
+migrations before accepting requests. `Ctrl+C` and `SIGTERM` trigger a graceful
+shutdown: in-flight requests finish, then the process exits. The web app keeps
+its session cookie, and the desktop sync client resumes from its saved cursor
+after the server comes back.
 
 ## Configuration
 

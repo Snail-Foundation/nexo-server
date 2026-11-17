@@ -33,6 +33,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    tracing::info!("Nexo server stopped");
+
     Ok(())
 }
 
@@ -55,7 +57,11 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
+        () = ctrl_c => {
+            tracing::info!("shutdown requested by Ctrl+C");
+        },
+        () = terminate => {
+            tracing::info!("shutdown requested by SIGTERM");
+        },
     }
 }
