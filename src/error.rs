@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use thiserror::Error;
@@ -34,6 +34,9 @@ pub enum AppError {
     #[error("forbidden")]
     Forbidden,
 
+    #[error("too many attempts")]
+    TooManyAttempts,
+
     #[error("not found")]
     NotFound,
 
@@ -52,6 +55,10 @@ impl IntoResponse for AppError {
         let (status, message) = match &self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_owned()),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_owned()),
+            Self::TooManyAttempts => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many attempts".to_owned(),
+            ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not found".to_owned()),
             Self::Conflict(message) => (StatusCode::CONFLICT, message.clone()),
             Self::Validation(message) => (StatusCode::UNPROCESSABLE_ENTITY, message.clone()),
@@ -71,6 +78,14 @@ impl IntoResponse for AppError {
             }
         };
 
-        (status, Json(json!({ "error": message }))).into_response()
+        let mut response = (status, Json(json!({ "error": message }))).into_response();
+
+        if matches!(&self, Self::TooManyAttempts) {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("900"));
+        }
+
+        response
     }
 }

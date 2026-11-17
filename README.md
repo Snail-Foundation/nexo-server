@@ -25,14 +25,17 @@ and the same URLs in both cases.
 
 - Axum 0.8 + SQLx 0.9 (SQLite) + Askama 0.16 + HTMX, with mobile-first CSS and
   no Node build.
-- SQLite schema v4 with 24 tables: the v1 core (business, branch, device,
-  users, auth sessions, server settings, operation log, device cursors, sync
-  anomalies, audit events), master-data projections, the order projections
-  (`restaurant_order`, `order_line`, and `order_event`), and the billing
-  projections (`sale`, `sale_line`, `payment`, `cash_session`, and
+- SQLite schema v5 with 25 tables: the v1 core (business, branch, device,
+  users, auth sessions, login throttling, server settings, operation log,
+  device cursors, sync anomalies, audit events), master-data projections, the
+  order projections (`restaurant_order`, `order_line`, and `order_event`), and
+  the billing projections (`sale`, `sale_line`, `payment`, `cash_session`, and
   `cash_movement`).
 - PIN login with Argon2 hashes, hashed bearer tokens, `HttpOnly` +
-  `SameSite=Strict` web session cookies, and CSRF validation on logout.
+  `SameSite=Strict` web session cookies, CSRF validation on logout and every
+  mutating form, and a persistent login throttle shared by web login, API
+  login, and snapshot linking. Sessions stop working immediately when the user
+  is deactivated.
 - Append-only operation log with idempotent push by operation ID and ordered
   pull by server sequence. Accepted operations are projected into the
   master-data, order, sale, payment, and cash read models; invalid transitions
@@ -54,12 +57,16 @@ and the same URLs in both cases.
   `sale_cancelled` records an audit event. Billed orders appear as "Cobrado" in
   the web app.
 - Role checks: `admin`, `cashier`, and `waiter` can open orders, add lines,
-  send rounds, void, and serve; `admin` and `kitchen` can mark ready; every role
-  can view the tables, takeout list, order detail, menu, and kitchen board.
-- 39 tests, including order and billing projection folding, commutative
+  send rounds, void, and serve; `admin` and `kitchen` can mark ready. Page
+  access follows the role: tables, takeout, and order detail are for
+  `admin`/`cashier`/`waiter`; the kitchen board is for `admin`/`kitchen`; the
+  menu and sold-out toggle are available to every role. The navigation hides
+  modules the current role cannot use.
+- 49 tests, including order and billing projection folding, commutative
   `order_billed`, rejected billing of a cancelled order, duplicate-table and
   invalid transition anomalies, the full waiter/kitchen web flow, takeout
-  creation, and CSRF/role rejection.
+  creation, login throttling across web and API, inactive-user session
+  rejection, page permissions, and CSRF/role rejection.
 
 Cashier billing remains desktop-first: the web app displays billed orders but
 does not charge them.
@@ -144,8 +151,17 @@ Then open `http://localhost:8080` on the same machine or
 
 - PINs are hashed with Argon2; tokens are stored as SHA-256 hashes, never in
   plain text.
+- Failed PIN attempts are counted per normalized user name in a persistent
+  fixed window. After 5 failures in 15 minutes the user is locked for 15
+  minutes. Web login, API login, and snapshot linking share the same counter,
+  so switching channels does not reset it. The web login page and API return
+  `429 Too Many Requests` with `Retry-After`.
 - Web sessions use `HttpOnly` and `SameSite=Strict` cookies. Logout requires the
-  per-session CSRF token.
+  per-session CSRF token, and CSRF tokens are compared in constant time.
+- Sessions are checked against the user's active flag on every request, so
+  deactivating a user invalidates existing web and API sessions.
+- Page handlers enforce roles in addition to the mutation handlers, and the
+  navigation only shows modules the current role can use.
 - API clients authenticate with `Authorization: Bearer <token>`.
 - The MVP serves plain HTTP on the local network. Full PWA installability needs
   HTTPS and is deferred; the current client uses a home-screen shortcut.

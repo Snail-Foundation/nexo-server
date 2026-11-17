@@ -16,6 +16,18 @@ use crate::time::now_ms;
 /// Name of the web session cookie.
 pub const SESSION_COOKIE: &str = "nexo_session";
 
+/// Failed PIN attempts allowed inside one throttle window.
+pub const LOGIN_MAX_FAILURES: i64 = 5;
+
+/// Duration of the fixed failure-counting window.
+pub const LOGIN_WINDOW_MS: i64 = 15 * 60 * 1000;
+
+/// How long a user stays locked after reaching the failure threshold.
+pub const LOGIN_LOCK_MS: i64 = 15 * 60 * 1000;
+
+/// Throttle rows older than this are pruned on the next failed attempt.
+const LOGIN_THROTTLE_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
     Web,
@@ -200,7 +212,7 @@ pub async fn login(
             .map_err(|_| AppError::Validation("invalid device id".to_owned()))?;
     }
 
-    let Some(user) = authenticate(pool, user_name, pin).await? else {
+    let Some(user) = authenticate_throttled(pool, user_name, pin).await? else {
         return Ok(None);
     };
 
@@ -288,6 +300,135 @@ pub async fn authenticate(
         business_id: row.try_get("business_id")?,
         business_name: row.try_get("business_name")?,
     }))
+}
+
+/// Verifies credentials while enforcing the persistent login throttle.
+///
+/// This is the entry point used by web login, API login, and snapshot linking,
+/// so all PIN verification paths share the same failure counter.
+pub async fn authenticate_throttled(
+    pool: &SqlitePool,
+    user_name: &str,
+    pin: &str,
+) -> Result<Option<AuthenticatedUser>, AppError> {
+    let key_hash = throttle_key(user_name);
+    let now = now_ms();
+
+    ensure_login_allowed_at(pool, &key_hash, now).await?;
+
+    let user = authenticate(pool, user_name, pin).await?;
+
+    if user.is_some() {
+        clear_login_failures(pool, &key_hash).await?;
+    } else {
+        record_login_failure_at(pool, &key_hash, now).await?;
+    }
+
+    Ok(user)
+}
+
+/// Hashes a normalized user name for the throttle table.
+pub(crate) fn throttle_key(user_name: &str) -> String {
+    sha256_hex(&user_name.trim().to_lowercase())
+}
+
+async fn ensure_login_allowed_at(
+    pool: &SqlitePool,
+    key_hash: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    let locked_until_ms: Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT locked_until_ms
+         FROM login_throttle
+         WHERE key_hash = ?1",
+    )
+    .bind(key_hash)
+    .fetch_optional(pool)
+    .await?;
+
+    if locked_until_ms.flatten().is_some_and(|locked| locked > now) {
+        return Err(AppError::TooManyAttempts);
+    }
+
+    Ok(())
+}
+
+async fn record_login_failure_at(
+    pool: &SqlitePool,
+    key_hash: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    let mut transaction = pool.begin().await?;
+
+    let existing = sqlx::query(
+        "SELECT failure_count, window_started_at_ms, locked_until_ms
+         FROM login_throttle
+         WHERE key_hash = ?1",
+    )
+    .bind(key_hash)
+    .fetch_optional(&mut *transaction)
+    .await?;
+
+    let (failure_count, window_started_at_ms, locked_until_ms) = match existing {
+        Some(row) => (
+            row.try_get::<i64, _>("failure_count")?,
+            row.try_get::<i64, _>("window_started_at_ms")?,
+            row.try_get::<Option<i64>, _>("locked_until_ms")?,
+        ),
+        None => (0, now, None),
+    };
+
+    // A concurrent request may have locked the account already. Do not extend
+    // the lock, so a locked user cannot be locked out indefinitely.
+    if locked_until_ms.is_some_and(|locked| locked > now) {
+        transaction.rollback().await?;
+        return Ok(());
+    }
+
+    let window_expired = now.saturating_sub(window_started_at_ms) >= LOGIN_WINDOW_MS;
+    let (failure_count, window_started_at_ms) = if window_expired {
+        (1, now)
+    } else {
+        (failure_count + 1, window_started_at_ms)
+    };
+    let locked_until_ms = (failure_count >= LOGIN_MAX_FAILURES).then_some(now + LOGIN_LOCK_MS);
+
+    sqlx::query(
+        "INSERT INTO login_throttle (
+            key_hash, failure_count, window_started_at_ms, locked_until_ms,
+            updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(key_hash) DO UPDATE SET
+            failure_count = excluded.failure_count,
+            window_started_at_ms = excluded.window_started_at_ms,
+            locked_until_ms = excluded.locked_until_ms,
+            updated_at_ms = excluded.updated_at_ms",
+    )
+    .bind(key_hash)
+    .bind(failure_count)
+    .bind(window_started_at_ms)
+    .bind(locked_until_ms)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await?;
+
+    sqlx::query("DELETE FROM login_throttle WHERE updated_at_ms < ?1")
+        .bind(now - LOGIN_THROTTLE_RETENTION_MS)
+        .execute(&mut *transaction)
+        .await?;
+
+    transaction.commit().await?;
+
+    Ok(())
+}
+
+async fn clear_login_failures(pool: &SqlitePool, key_hash: &str) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM login_throttle WHERE key_hash = ?1")
+        .bind(key_hash)
+        .execute(pool)
+        .await?;
+
+    Ok(())
 }
 
 /// Loads a web session from the session cookie.
@@ -389,8 +530,40 @@ pub fn removal_cookie() -> Cookie<'static> {
 }
 
 /// Returns true when the submitted CSRF token matches the session.
+///
+/// The comparison scans the whole token instead of stopping at the first
+/// differing byte.
 pub fn csrf_matches(session: &SessionUser, submitted: &str) -> bool {
-    !session.csrf_token.is_empty() && session.csrf_token == submitted
+    !session.csrf_token.is_empty()
+        && constant_time_eq(session.csrf_token.as_bytes(), submitted.as_bytes())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+
+    let mut difference = 0u8;
+    for (left, right) in left.iter().zip(right) {
+        difference |= left ^ right;
+    }
+
+    difference == 0
+}
+
+/// Roles that can serve tables, takeout, and order actions.
+pub fn can_serve(role: &str) -> bool {
+    matches!(role, "admin" | "cashier" | "waiter")
+}
+
+/// Roles that can work the kitchen board.
+pub fn can_kitchen(role: &str) -> bool {
+    matches!(role, "admin" | "kitchen")
+}
+
+/// Roles that can manage cash and reports in the web app.
+pub fn can_manage(role: &str) -> bool {
+    matches!(role, "admin" | "cashier")
 }
 
 /// Maps a role to its Spanish label for the web app.
@@ -448,6 +621,7 @@ async fn lookup_session(
            AND s.kind = ?2
            AND s.revoked_at_ms IS NULL
            AND s.expires_at_ms > ?3
+           AND u.is_active = 1
          LIMIT 1",
     )
     .bind(token_hash)
@@ -648,6 +822,158 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn inactive_users_cannot_use_existing_sessions() {
+        let pool = pool_with_admin().await;
+        let web = login(&pool, "Admin", "1234", SessionKind::Web, None, 12)
+            .await
+            .unwrap()
+            .unwrap();
+        let api = login(&pool, "Admin", "1234", SessionKind::Api, None, 12)
+            .await
+            .unwrap()
+            .unwrap();
+
+        sqlx::query("UPDATE app_user SET is_active = 0")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let jar = CookieJar::new().add(Cookie::new(SESSION_COOKIE, web.token.clone()));
+        assert!(web_session(&pool, &jar).await.unwrap().is_none());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            format!("Bearer {}", api.token).parse().unwrap(),
+        );
+        assert!(matches!(
+            api_session(&pool, &headers).await,
+            Err(AppError::Unauthorized)
+        ));
+
+        assert!(
+            login(&pool, "Admin", "1234", SessionKind::Web, None, 12)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_logins_lock_the_account_until_the_window_expires() {
+        let pool = pool_with_admin().await;
+        let key = throttle_key("Admin");
+        let start = now_ms();
+
+        for _ in 0..LOGIN_MAX_FAILURES {
+            record_login_failure_at(&pool, &key, start).await.unwrap();
+        }
+
+        assert!(matches!(
+            ensure_login_allowed_at(&pool, &key, start + 1).await,
+            Err(AppError::TooManyAttempts)
+        ));
+
+        // The correct PIN is rejected too while the account is locked.
+        assert!(matches!(
+            authenticate_throttled(&pool, "Admin", "1234").await,
+            Err(AppError::TooManyAttempts)
+        ));
+
+        assert!(
+            ensure_login_allowed_at(&pool, &key, start + LOGIN_LOCK_MS + 1)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_failure_window_resets_after_it_expires() {
+        let pool = pool_with_admin().await;
+        let key = throttle_key("Admin");
+        let start = now_ms();
+
+        for _ in 0..(LOGIN_MAX_FAILURES - 1) {
+            record_login_failure_at(&pool, &key, start).await.unwrap();
+        }
+
+        record_login_failure_at(&pool, &key, start + LOGIN_WINDOW_MS + 1)
+            .await
+            .unwrap();
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT failure_count FROM login_throttle WHERE key_hash = ?1")
+                .bind(&key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+
+        let locked: Option<i64> =
+            sqlx::query_scalar("SELECT locked_until_ms FROM login_throttle WHERE key_hash = ?1")
+                .bind(&key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(locked.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_successful_login_clears_failed_attempts() {
+        let pool = pool_with_admin().await;
+
+        assert!(
+            login(&pool, "Admin", "0000", SessionKind::Web, None, 12)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM login_throttle")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        login(&pool, "Admin", "1234", SessionKind::Web, None, 12)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM login_throttle")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn csrf_tokens_are_compared_exactly() {
+        let session = SessionUser {
+            session_id: "session".to_owned(),
+            user_id: "user".to_owned(),
+            display_name: "Admin".to_owned(),
+            role: "admin".to_owned(),
+            business_id: "business".to_owned(),
+            business_name: "Café Central".to_owned(),
+            csrf_token: "abc123".to_owned(),
+            device_id: None,
+        };
+
+        assert!(csrf_matches(&session, "abc123"));
+        assert!(!csrf_matches(&session, "abc124"));
+        assert!(!csrf_matches(&session, "abc12"));
+        assert!(!csrf_matches(&session, ""));
+        assert!(!csrf_matches(&session, "abc1234"));
+
+        let empty = SessionUser {
+            csrf_token: String::new(),
+            ..session
+        };
+        assert!(!csrf_matches(&empty, ""));
     }
 
     #[test]

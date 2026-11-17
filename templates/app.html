@@ -7,6 +7,7 @@
 </section>
 
 <section class="grid" aria-label="Módulos">
+  {% if common.can_serve %}
   <a class="module link" href="/app/tables">
     <h2>Mesas</h2>
     <p>Mesas libres y ocupadas</p>
@@ -15,14 +16,18 @@
     <h2>Para llevar</h2>
     <p>Pedidos de mostrador</p>
   </a>
+  {% endif %}
+  {% if common.can_kitchen %}
   <a class="module link" href="/app/kitchen">
     <h2>Cocina</h2>
     <p>Comandas en curso</p>
   </a>
+  {% endif %}
   <a class="module link" href="/app/menu">
     <h2>Menú</h2>
     <p>Platos y agotados</p>
   </a>
+  {% if common.can_manage %}
   <article class="module">
     <h2>Caja</h2>
     <p>Próxima fase</p>
@@ -31,6 +36,7 @@
     <h2>Reportes</h2>
     <p>Próxima fase</p>
   </article>
+  {% endif %}
 </section>
 
 <section

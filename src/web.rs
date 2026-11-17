@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use askama::Template;
 use axum::extract::{Form, Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
 use nexo_core::{
@@ -30,6 +30,9 @@ struct PageContext {
     role_label: String,
     csrf_token: String,
     version: &'static str,
+    can_serve: bool,
+    can_kitchen: bool,
+    can_manage: bool,
 }
 
 fn page_context(session: &SessionUser) -> PageContext {
@@ -39,6 +42,9 @@ fn page_context(session: &SessionUser) -> PageContext {
         role_label: auth::role_label(&session.role).to_owned(),
         csrf_token: session.csrf_token.clone(),
         version: env!("CARGO_PKG_VERSION"),
+        can_serve: auth::can_serve(&session.role),
+        can_kitchen: auth::can_kitchen(&session.role),
+        can_manage: auth::can_manage(&session.role),
     }
 }
 
@@ -47,6 +53,10 @@ fn page_context(session: &SessionUser) -> PageContext {
 struct LoginTemplate {
     error: String,
 }
+
+#[derive(Template)]
+#[template(path = "forbidden.html")]
+struct ForbiddenTemplate;
 
 #[derive(Template)]
 #[template(path = "app.html")]
@@ -295,7 +305,7 @@ pub async fn login_submit(
     jar: CookieJar,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, AppError> {
-    let Some(login) = auth::login(
+    let login = match auth::login(
         &state.pool,
         &form.user,
         &form.pin,
@@ -303,14 +313,30 @@ pub async fn login_submit(
         None,
         state.config.session_hours,
     )
-    .await?
-    else {
-        let html = LoginTemplate {
-            error: "Usuario o PIN incorrecto.".to_owned(),
-        }
-        .render()?;
+    .await
+    {
+        Ok(Some(login)) => login,
+        Ok(None) => {
+            let html = LoginTemplate {
+                error: "Usuario o PIN incorrecto.".to_owned(),
+            }
+            .render()?;
 
-        return Ok((StatusCode::UNAUTHORIZED, Html(html)).into_response());
+            return Ok((StatusCode::UNAUTHORIZED, Html(html)).into_response());
+        }
+        Err(AppError::TooManyAttempts) => {
+            let html = LoginTemplate {
+                error: "Demasiados intentos. Espera 15 minutos e intenta de nuevo.".to_owned(),
+            }
+            .render()?;
+            let mut response = (StatusCode::TOO_MANY_REQUESTS, Html(html)).into_response();
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("900"));
+
+            return Ok(response);
+        }
+        Err(error) => return Err(error),
     };
 
     let cookie = auth::session_cookie(login.token);
@@ -341,6 +367,10 @@ pub async fn tables_page(
     let Some(session) = auth::web_session(&state.pool, &jar).await? else {
         return Ok(Redirect::to("/login").into_response());
     };
+
+    if !TABLE_ROLES.contains(&session.role.as_str()) {
+        return forbidden_page();
+    }
 
     let tables = load_tables(&state, &session).await?;
 
@@ -439,6 +469,10 @@ pub async fn takeout_page(
         return Ok(Redirect::to("/login").into_response());
     };
 
+    if !TABLE_ROLES.contains(&session.role.as_str()) {
+        return forbidden_page();
+    }
+
     let orders = load_open_takeout(&state, &session).await?;
 
     let html = TakeoutTemplate {
@@ -505,6 +539,10 @@ pub async fn order_page(
     let Some(session) = auth::web_session(&state.pool, &jar).await? else {
         return Ok(Redirect::to("/login").into_response());
     };
+
+    if !TABLE_ROLES.contains(&session.role.as_str()) {
+        return forbidden_page();
+    }
 
     let order_id = order_id
         .parse::<OrderId>()
@@ -1049,6 +1087,10 @@ pub async fn kitchen_page(
         return Ok(Redirect::to("/login").into_response());
     };
 
+    if !KITCHEN_ROLES.contains(&session.role.as_str()) {
+        return forbidden_page();
+    }
+
     let orders = load_kitchen_orders(&state, &session).await?;
 
     let html = KitchenTemplate {
@@ -1069,6 +1111,10 @@ pub async fn kitchen_board(
     let Some(session) = auth::web_session(&state.pool, &jar).await? else {
         return Ok(Html("Sesión expirada. Vuelve a entrar.").into_response());
     };
+
+    if !KITCHEN_ROLES.contains(&session.role.as_str()) {
+        return Ok((StatusCode::FORBIDDEN, Html("Sin permiso.")).into_response());
+    }
 
     kitchen_board_response(&state, &session).await
 }
@@ -1449,12 +1495,21 @@ async fn next_display_code(
     Ok(format!("{prefix}-{:03}", last.unwrap_or(0) + 1))
 }
 
+const TABLE_ROLES: &[&str] = &["admin", "cashier", "waiter"];
+const KITCHEN_ROLES: &[&str] = &["admin", "kitchen"];
+
 fn require_roles(session: &SessionUser, roles: &[&str]) -> Result<(), AppError> {
     if roles.contains(&session.role.as_str()) {
         Ok(())
     } else {
         Err(AppError::Forbidden)
     }
+}
+
+fn forbidden_page() -> Result<Response, AppError> {
+    let html = ForbiddenTemplate.render()?;
+
+    Ok((StatusCode::FORBIDDEN, Html(html)).into_response())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2100,6 +2155,77 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/login");
+    }
+
+    #[tokio::test]
+    async fn login_is_throttled_after_repeated_failures() {
+        let state = test_support::state().await;
+
+        for _ in 0..auth::LOGIN_MAX_FAILURES {
+            let response = router(state.clone())
+                .oneshot(form_request("/login", "user=Admin&pin=0000"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let response = router(state)
+            .oneshot(form_request("/login", "user=Admin&pin=1234"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "900");
+        let body = body_text(response).await;
+        assert!(body.contains("Demasiados intentos"));
+    }
+
+    #[tokio::test]
+    async fn deactivated_users_lose_web_access_immediately() {
+        let state = test_support::state().await;
+        let cookie = web_login(&state).await;
+
+        sqlx::query("UPDATE app_user SET is_active = 0")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        let response = get_page(&state, "/app", &cookie).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/login");
+    }
+
+    #[tokio::test]
+    async fn page_permissions_and_navigation_follow_the_role() {
+        let (state, _admin_cookie, _item_id) = linked_state().await;
+        add_user(&state, "Cocina", "kitchen", "1357").await;
+        add_user(&state, "Mesonero", "waiter", "2468").await;
+
+        let kitchen_cookie = web_login_as(&state, "Cocina", "1357").await;
+        let waiter_cookie = web_login_as(&state, "Mesonero", "2468").await;
+
+        let response = get_page(&state, "/app/tables", &kitchen_cookie).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = get_page(&state, "/app/takeout", &kitchen_cookie).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = get_page(&state, "/app/kitchen", &kitchen_cookie).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("Cocina"));
+        assert!(!body.contains("href=\"/app/tables\""));
+        assert!(!body.contains("href=\"/app/takeout\""));
+
+        let response = get_page(&state, "/app/kitchen", &waiter_cookie).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = get_page(&state, "/app/tables", &waiter_cookie).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("href=\"/app/tables\""));
+        assert!(body.contains("href=\"/app/takeout\""));
+        assert!(!body.contains("href=\"/app/kitchen\""));
     }
 
     #[tokio::test]

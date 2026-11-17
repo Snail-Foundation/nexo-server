@@ -24,9 +24,13 @@
 
 <nav class="tabs" aria-label="Secciones">
   <a href="/app" class="{% if active == "home" %}active{% endif %}">Inicio</a>
+  {% if common.can_serve %}
   <a href="/app/tables" class="{% if active == "tables" %}active{% endif %}">Mesas</a>
   <a href="/app/takeout" class="{% if active == "takeout" %}active{% endif %}">Para llevar</a>
+  {% endif %}
+  {% if common.can_kitchen %}
   <a href="/app/kitchen" class="{% if active == "kitchen" %}active{% endif %}">Cocina</a>
+  {% endif %}
   <a href="/app/menu" class="{% if active == "menu" %}active{% endif %}">Menú</a>
 </nav>
 

@@ -62,7 +62,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(table_count, 24);
+        assert_eq!(table_count, 25);
     }
 
     #[tokio::test]
@@ -77,6 +77,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(applied, 4);
+        assert_eq!(applied, 5);
     }
 }

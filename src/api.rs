@@ -224,6 +224,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_is_throttled_after_repeated_failures() {
+        let state = test_support::state().await;
+
+        for _ in 0..auth::LOGIN_MAX_FAILURES {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/login")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(r#"{"user":"Admin","pin":"0000"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"user":"Admin","pin":"1234"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "900");
+        let value = json_body(response).await;
+        assert_eq!(value["error"], "too many attempts");
+    }
+
+    #[tokio::test]
     async fn push_and_pull_round_trip_with_a_bearer_token() {
         let state = test_support::state().await;
         let token = api_login(&state).await;

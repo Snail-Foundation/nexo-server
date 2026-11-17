@@ -132,7 +132,8 @@ pub struct LinkResponse {
 
 /// Imports a desktop snapshot into an empty server and issues a device token.
 pub async fn link(pool: &SqlitePool, request: LinkRequest) -> Result<LinkResponse, AppError> {
-    let Some(admin) = auth::authenticate(pool, &request.server_user, &request.server_pin).await?
+    let Some(admin) =
+        auth::authenticate_throttled(pool, &request.server_user, &request.server_pin).await?
     else {
         return Err(AppError::Unauthorized);
     };
@@ -735,5 +736,36 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::Unauthorized)));
+    }
+
+    #[tokio::test]
+    async fn linking_shares_login_throttling() {
+        let state = test_support::state().await;
+
+        for _ in 0..auth::LOGIN_MAX_FAILURES {
+            let result = link(
+                &state.pool,
+                LinkRequest {
+                    server_user: "Admin".to_owned(),
+                    server_pin: "0000".to_owned(),
+                    snapshot: sample_snapshot(),
+                },
+            )
+            .await;
+
+            assert!(matches!(result, Err(AppError::Unauthorized)));
+        }
+
+        let result = link(
+            &state.pool,
+            LinkRequest {
+                server_user: "Admin".to_owned(),
+                server_pin: "1234".to_owned(),
+                snapshot: sample_snapshot(),
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::TooManyAttempts)));
     }
 }
