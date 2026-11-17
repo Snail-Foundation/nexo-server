@@ -329,17 +329,20 @@ button.ghost:hover {
 
 .tabs {
   display: flex;
-  gap: 6px;
-  padding: 10px 16px;
+  gap: 4px;
+  padding: 8px 12px;
   overflow-x: auto;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
 
 .tabs a {
+  display: inline-flex;
   flex: 0 0 auto;
-  padding: 10px 14px;
-  font-size: 14px;
+  align-items: center;
+  min-height: var(--tap);
+  padding: 0 9px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--muted);
   text-decoration: none;

@@ -23,15 +23,15 @@
 </header>
 
 <nav class="tabs" aria-label="Secciones">
-  <a href="/app" class="{% if active == "home" %}active{% endif %}">Inicio</a>
+  <a href="/app" class="{% if active == "home" %}active{% endif %}"{% if active == "home" %} aria-current="page"{% endif %}>Inicio</a>
   {% if common.can_serve %}
-  <a href="/app/tables" class="{% if active == "tables" %}active{% endif %}">Mesas</a>
-  <a href="/app/takeout" class="{% if active == "takeout" %}active{% endif %}">Para llevar</a>
+  <a href="/app/tables" class="{% if active == "tables" %}active{% endif %}"{% if active == "tables" %} aria-current="page"{% endif %}>Mesas</a>
+  <a href="/app/takeout" class="{% if active == "takeout" %}active{% endif %}"{% if active == "takeout" %} aria-current="page"{% endif %}>Para llevar</a>
   {% endif %}
   {% if common.can_kitchen %}
-  <a href="/app/kitchen" class="{% if active == "kitchen" %}active{% endif %}">Cocina</a>
+  <a href="/app/kitchen" class="{% if active == "kitchen" %}active{% endif %}"{% if active == "kitchen" %} aria-current="page"{% endif %}>Cocina</a>
   {% endif %}
-  <a href="/app/menu" class="{% if active == "menu" %}active{% endif %}">Menú</a>
+  <a href="/app/menu" class="{% if active == "menu" %}active{% endif %}"{% if active == "menu" %} aria-current="page"{% endif %}>Menú</a>
 </nav>
 
 <main class="layout">

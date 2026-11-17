@@ -22,6 +22,11 @@ use crate::time::{format_local_time, now_ms};
 
 const STYLESHEET: &str = include_str!("../static/app.css");
 const HTMX: &str = include_str!("../static/htmx.min.js");
+const MANIFEST: &str = include_str!("../static/manifest.webmanifest");
+const ICON_SVG: &str = include_str!("../static/icon.svg");
+const ICON_192: &[u8] = include_bytes!("../static/icon-192.png");
+const ICON_512: &[u8] = include_bytes!("../static/icon-512.png");
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../static/apple-touch-icon.png");
 
 #[derive(Clone)]
 struct PageContext {
@@ -150,6 +155,9 @@ struct OrderView {
     pending_lines: i64,
     ready_lines: i64,
     can_edit: bool,
+    active: &'static str,
+    back_href: &'static str,
+    back_label: &'static str,
     rounds: Vec<OrderRoundView>,
     menu: Vec<OrderMenuCategoryView>,
 }
@@ -555,7 +563,7 @@ pub async fn order_page(
 
     let html = OrderTemplate {
         common: page_context(&session),
-        active: "tables",
+        active: order.active,
         order,
     }
     .render()?;
@@ -1270,6 +1278,12 @@ async fn order_view(
         Vec::new()
     };
 
+    let (active, back_href, back_label) = if detail.order.order_type == "takeout" {
+        ("takeout", "/app/takeout", "Volver a para llevar")
+    } else {
+        ("tables", "/app/tables", "Volver a mesas")
+    };
+
     Ok(OrderView {
         id: detail.order.id.clone(),
         label: order_label(
@@ -1287,6 +1301,9 @@ async fn order_view(
         pending_lines: detail.order.pending_lines,
         ready_lines,
         can_edit,
+        active,
+        back_href,
+        back_label,
         rounds,
         menu,
     })
@@ -1725,6 +1742,34 @@ pub async fn htmx() -> impl IntoResponse {
     )
 }
 
+/// Web app manifest used by the home-screen shortcut.
+pub async fn manifest() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/manifest+json")],
+        MANIFEST,
+    )
+}
+
+/// Scalable application icon.
+pub async fn icon_svg() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/svg+xml")], ICON_SVG)
+}
+
+/// 192 px application icon.
+pub async fn icon_192() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/png")], ICON_192)
+}
+
+/// 512 px application icon.
+pub async fn icon_512() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/png")], ICON_512)
+}
+
+/// Apple touch icon for the iOS home screen.
+pub async fn apple_touch_icon() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/png")], APPLE_TOUCH_ICON)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
@@ -1950,6 +1995,13 @@ mod tests {
         assert!(body.contains("Arepa"));
         assert!(body.contains("En cocina"));
         assert!(body.contains("5.00 USD"));
+        assert!(body.contains("Volver a mesas"));
+        assert!(!body.contains("Volver a para llevar"));
+        assert!(
+            body.contains(
+                "<a href=\"/app/tables\" class=\"active\" aria-current=\"page\">Mesas</a>"
+            )
+        );
 
         let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM operation_log ORDER BY seq")
             .fetch_all(&state.pool)
@@ -2065,6 +2117,13 @@ mod tests {
         let body = body_text(get_page(&state, "/app/takeout", &cookie).await).await;
         assert!(body.contains("Carla"));
         assert!(body.contains("L-001"));
+
+        let detail = body_text(get_page(&state, &location, &cookie).await).await;
+        assert!(detail.contains("Volver a para llevar"));
+        assert!(!detail.contains("Volver a mesas"));
+        assert!(detail.contains(
+            "<a href=\"/app/takeout\" class=\"active\" aria-current=\"page\">Para llevar</a>"
+        ));
     }
 
     #[tokio::test]
@@ -2116,6 +2175,10 @@ mod tests {
         let body = body_text(response).await;
         assert!(body.contains("Entrar"));
         assert!(body.contains("Nexo Restaurantes"));
+        assert!(body.contains("viewport-fit=cover"));
+        assert!(body.contains("rel=\"manifest\""));
+        assert!(body.contains("apple-mobile-web-app-capable"));
+        assert!(body.contains("apple-touch-icon"));
 
         let response = router(state)
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -2124,6 +2187,46 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/login");
+    }
+
+    #[tokio::test]
+    async fn mobile_web_app_metadata_is_served() {
+        let state = test_support::state().await;
+
+        let cases = [
+            (
+                "/static/manifest.webmanifest",
+                "application/manifest+json",
+                Some("\"start_url\": \"/app\""),
+            ),
+            ("/static/icon.svg", "image/svg+xml", Some("<svg")),
+            ("/static/icon-192.png", "image/png", None),
+            ("/static/icon-512.png", "image/png", None),
+            ("/static/apple-touch-icon.png", "image/png", None),
+        ];
+
+        for (uri, content_type, marker) in cases {
+            let response = router(state.clone())
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                content_type,
+                "{uri}"
+            );
+
+            if let Some(marker) = marker {
+                assert!(body_text(response).await.contains(marker), "{uri}");
+            }
+        }
     }
 
     #[tokio::test]
