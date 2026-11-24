@@ -1,0 +1,136 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<section class="hero order-hero">
+  <div>
+    <p class="eyebrow">{{ order.order_type_label }} · {{ order.display_code }}</p>
+    <h1>{{ order.label }}</h1>
+    <p class="muted">Abierto {{ order.opened_at }}</p>
+  </div>
+  <a class="button-link ghost" href="/app/cashier">Volver a caja</a>
+</section>
+
+<section class="card">
+  <h2>Consumo</h2>
+  {% if order.lines.is_empty() %}
+  <p class="muted">Este pedido no tiene líneas para cobrar.</p>
+  {% else %}
+  <ul class="line-list">
+    {% for line in order.lines %}
+    <li class="order-line">
+      <div class="line-main">
+        <strong>{{ line.quantity }}× {{ line.description }}</strong>
+        {% if !line.notes.is_empty() %}
+        <span class="muted">{{ line.notes }}</span>
+        {% endif %}
+      </div>
+      <span class="price">{{ line.total }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<section class="card total-card">
+  {% if tax_enabled %}
+  <div class="total-row muted">
+    <span>Subtotal</span>
+    <span>{{ subtotal }}</span>
+  </div>
+  <div class="total-row muted">
+    <span>{{ tax_name }} incluido ({{ tax_rate_label }})</span>
+    <span>{{ tax }}</span>
+  </div>
+  {% endif %}
+  <div class="total-row total-strong">
+    <span>Total a cobrar</span>
+    <strong>{{ total }}</strong>
+  </div>
+</section>
+
+{% if methods.is_empty() %}
+<section class="card notice">
+  <h2>No hay métodos de pago</h2>
+  <p class="muted">Crea al menos un método de pago en Administración antes de cobrar.</p>
+  <a class="button-link" href="/app/admin">Ir a Administración</a>
+</section>
+{% else %}
+<section class="card">
+  <h2>Pago</h2>
+  {% if !has_cash_session %}
+  <p class="notice-text">
+    Los pagos en efectivo requieren una caja abierta.
+    <a href="/app/cash">Abrir caja</a>.
+  </p>
+  {% endif %}
+
+  <form method="post" action="/app/orders/{{ order.id }}/bill" class="stack" id="bill-form">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+
+    <label class="field">
+      <span>Tasa de cambio ({{ secondary_currency }} por {{ base_currency }})</span>
+      <input
+        name="exchange_rate"
+        inputmode="decimal"
+        value="{{ exchange_rate }}"
+        placeholder="Ej. 36.50"
+        autocomplete="off"
+      >
+    </label>
+
+    <div id="payment-rows" class="stack">
+      <div class="payment-row">
+        <label class="field grow">
+          <span>Método</span>
+          <select name="method_id" required>
+            {% for method in methods %}
+            <option value="{{ method.id }}">
+              {{ method.name }} · {{ method.kind_label }}{% if !method.currency.is_empty() %} · {{ method.currency }}{% endif %}
+            </option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Moneda</span>
+          <select name="currency">
+            <option value="{{ base_currency }}">{{ base_currency }}</option>
+            <option value="{{ secondary_currency }}">{{ secondary_currency }}</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Monto</span>
+          <input name="amount" inputmode="decimal" placeholder="0.00" required autocomplete="off">
+        </label>
+        <label class="field grow">
+          <span>Referencia</span>
+          <input name="reference" placeholder="Opcional" autocomplete="off">
+        </label>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="ghost" type="button" onclick="addPaymentRow()">Agregar otro pago</button>
+      <button class="primary" type="submit">Cobrar y cerrar pedido</button>
+    </div>
+    <p class="muted small">
+      El último pago puede ser mayor que el saldo; el cambio se calcula en su moneda.
+    </p>
+  </form>
+</section>
+
+<script>
+  function addPaymentRow() {
+    var rows = document.getElementById("payment-rows");
+    var first = rows.querySelector(".payment-row");
+    if (!first || rows.querySelectorAll(".payment-row").length >= 4) {
+      return;
+    }
+    var clone = first.cloneNode(true);
+    clone.querySelectorAll("input").forEach(function (input) {
+      input.value = "";
+    });
+    rows.appendChild(clone);
+  }
+</script>
+{% endif %}
+{% endblock %}

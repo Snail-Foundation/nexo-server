@@ -1,0 +1,79 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">Caja</p>
+    <h1>Cobrar pedidos</h1>
+    <p class="muted">Cobra mesas y pedidos para llevar desde cualquier navegador.</p>
+  </div>
+  <a class="button-link ghost" href="/app/cash">Sesión de caja</a>
+</section>
+
+{% match session %}
+{% when Some with (cash) %}
+<section class="card session-card">
+  <div class="section-head">
+    <div>
+      <h2>Caja abierta</h2>
+      <p class="muted">Desde {{ cash.opened_at }} · {{ cash.opened_by }}</p>
+    </div>
+    <span class="badge ok">{{ cash.status_label }}</span>
+  </div>
+  <dl class="summary-grid">
+    <div><dt>Apertura {{ cash.base_currency }}</dt><dd>{{ cash.opening_base }}</dd></div>
+    <div><dt>Apertura {{ cash.secondary_currency }}</dt><dd>{{ cash.opening_secondary }}</dd></div>
+    <div><dt>Esperado {{ cash.base_currency }}</dt><dd>{{ cash.expected_base }}</dd></div>
+    <div><dt>Esperado {{ cash.secondary_currency }}</dt><dd>{{ cash.expected_secondary }}</dd></div>
+  </dl>
+  <div class="actions">
+    <a class="button-link ghost" href="/app/cash">Movimientos y cierre</a>
+  </div>
+</section>
+{% when None %}
+<section class="card notice">
+  <h2>No hay caja abierta</h2>
+  <p class="muted">Abre la caja para cobrar en efectivo y llevar el cuadre del turno.</p>
+  <a class="button-link" href="/app/cash">Abrir caja</a>
+</section>
+{% endmatch %}
+
+<section
+  id="cashier-orders"
+  hx-get="/app/cashier"
+  hx-trigger="every 5s"
+  hx-select="#cashier-orders"
+  hx-swap="outerHTML"
+>
+  <div class="section-head">
+    <h2>Pedidos por cobrar</h2>
+    <span class="muted">{{ orders.len() }}</span>
+  </div>
+
+  {% if orders.is_empty() %}
+  <div class="card empty">
+    <p class="muted">No hay pedidos abiertos. Abre una mesa o crea uno para llevar.</p>
+  </div>
+  {% else %}
+  <div class="grid order-grid">
+    {% for order in orders %}
+    <article class="module order-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">{{ order.display_code }}</p>
+          <h3>{{ order.label }}</h3>
+          <p class="muted">Abierto {{ order.opened_at }}</p>
+        </div>
+        <span class="badge neutral">{{ order.status_label }}</span>
+      </div>
+      <div class="total-row">
+        <span>Total</span>
+        <strong>{{ order.total }}</strong>
+      </div>
+      <a class="button-link" href="/app/orders/{{ order.id }}/bill">Cobrar</a>
+    </article>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

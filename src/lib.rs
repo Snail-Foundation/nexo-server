@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod billing;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -32,10 +33,12 @@ pub fn router(state: AppState) -> Router {
             get(web::takeout_page).post(web::open_takeout),
         )
         .route("/app/orders/{id}", get(web::order_page))
+        .route("/app/orders/{id}/status", get(web::order_status_fragment))
         .route("/app/orders/{id}/lines", post(web::add_order_line))
         .route("/app/orders/{id}/send", post(web::send_round))
         .route("/app/orders/{id}/ready", post(web::mark_order_ready))
         .route("/app/orders/{id}/served", post(web::mark_order_served))
+        .route("/app/orders/{id}/cancel", post(web::cancel_order))
         .route(
             "/app/orders/{id}/lines/{line_id}/void",
             post(web::void_line),
@@ -48,6 +51,29 @@ pub fn router(state: AppState) -> Router {
             "/app/orders/{id}/lines/{line_id}/served",
             post(web::mark_line_served),
         )
+        .route("/app/cashier", get(web::cashier_page))
+        .route(
+            "/app/orders/{id}/bill",
+            get(web::bill_page).post(web::bill_order),
+        )
+        .route("/app/sales/{id}", get(web::receipt_page))
+        .route("/app/cash", get(web::cash_page))
+        .route("/app/cash/open", post(web::open_cash))
+        .route("/app/cash/movements", post(web::record_cash))
+        .route("/app/cash/close", post(web::close_cash))
+        .route("/app/reports", get(web::reports_page))
+        .route("/app/reports.csv", get(web::reports_csv))
+        .route("/app/admin", get(web::admin_page))
+        .route("/app/admin/business", post(web::admin_business))
+        .route("/app/admin/categories", post(web::admin_category))
+        .route("/app/admin/items", post(web::admin_item))
+        .route("/app/admin/tables", post(web::admin_table))
+        .route("/app/admin/users", post(web::admin_user))
+        .route(
+            "/app/admin/payment-methods",
+            post(web::admin_payment_method),
+        )
+        .route("/app/admin/backup", get(web::admin_backup))
         .route("/app/kitchen", get(web::kitchen_page))
         .route("/app/kitchen/board", get(web::kitchen_board))
         .route("/app/menu", get(web::menu_page))
@@ -68,6 +94,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/link", post(api::link))
         .route("/api/sync/push", post(api::push))
         .route("/api/sync/pull", get(api::pull))
+        .layer(axum::middleware::from_fn(web::html_error_page))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -85,6 +112,26 @@ pub(crate) mod test_support {
 
         let config = Config {
             database_url: "sqlite::memory:".to_owned(),
+            addr: "127.0.0.1:0".to_owned(),
+            admin_pin: Some("1234".to_owned()),
+            business_name: "Café Central".to_owned(),
+            session_hours: 12,
+        };
+
+        auth::seed_admin(&pool, &config).await.unwrap();
+
+        AppState::new(pool, config)
+    }
+
+    /// Builds a file-backed state for tests that need a real database file.
+    pub(crate) async fn file_state() -> AppState {
+        let path = std::env::temp_dir().join(format!("nexo-test-{}.db", nexo_core::Uuid::now_v7()));
+        let database_url = format!("sqlite://{}?mode=rwc", path.to_string_lossy());
+        let pool = db::connect(&database_url).await.unwrap();
+        db::migrate(&pool).await.unwrap();
+
+        let config = Config {
+            database_url,
             addr: "127.0.0.1:0".to_owned(),
             admin_pin: Some("1234".to_owned()),
             business_name: "Café Central".to_owned(),

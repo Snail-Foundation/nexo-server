@@ -1,0 +1,171 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<section class="hero order-hero no-print">
+  <div>
+    <p class="eyebrow">Reportes</p>
+    <h1>Ventas del día</h1>
+    <p class="muted">{{ date }} · {{ base_currency }}</p>
+  </div>
+  <div class="actions">
+    <a class="button-link ghost" href="/app/reports.csv?date={{ date }}">Descargar CSV</a>
+    <button class="primary" type="button" onclick="window.print()">Imprimir / PDF</button>
+  </div>
+</section>
+
+<section class="card no-print">
+  <form method="get" action="/app/reports" class="inline-form">
+    <label class="field grow">
+      <span>Fecha</span>
+      <input type="date" name="date" value="{{ date }}" required>
+    </label>
+    <button class="primary" type="submit">Ver reporte</button>
+  </form>
+</section>
+
+<section class="report-head">
+  <div>
+    <p class="eyebrow">Resumen</p>
+    <h2>{{ date }}</h2>
+  </div>
+  <span class="muted">{{ common.business_name }}</span>
+</section>
+
+<dl class="summary-grid report-summary">
+  <div><dt>Ventas</dt><dd>{{ sale_count }}</dd></div>
+  <div><dt>Total cobrado</dt><dd>{{ total }}</dd></div>
+  <div><dt>Ticket promedio</dt><dd>{{ average }}</dd></div>
+  {% if has_tax %}
+  <div><dt>Subtotal</dt><dd>{{ subtotal }}</dd></div>
+  <div><dt>{{ tax_label }}</dt><dd>{{ tax }}</dd></div>
+  {% endif %}
+</dl>
+
+{% if sale_count == 0 %}
+<section class="card empty">
+  <h2>Sin ventas</h2>
+  <p class="muted">No hay ventas registradas para esta fecha.</p>
+</section>
+{% else %}
+<section class="card">
+  <h2>Pagos por método</h2>
+  {% if payments.is_empty() %}
+  <p class="muted">No hay pagos registrados.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th>Método</th>
+          <th>Tipo</th>
+          <th class="right">Pagos</th>
+          <th class="right">Monto</th>
+          <th class="right">Equivalente {{ base_currency }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for payment in payments %}
+        <tr>
+          <td>{{ payment.method }}</td>
+          <td>{{ payment.kind_label }}</td>
+          <td class="right">{{ payment.count }}</td>
+          <td class="right">{{ payment.amount }}</td>
+          <td class="right">{{ payment.base_amount }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Platos más vendidos</h2>
+  {% if top_items.is_empty() %}
+  <p class="muted">No hay platos vendidos.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th>Plato</th>
+          <th class="right">Cantidad</th>
+          <th class="right">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in top_items %}
+        <tr>
+          <td>{{ item.description }}</td>
+          <td class="right">{{ item.quantity }}</td>
+          <td class="right">{{ item.total }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Ventas</h2>
+  <div class="table-wrap">
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th>Ticket</th>
+          <th>Hora</th>
+          <th>Pedido</th>
+          <th>Tipo</th>
+          <th class="right">Total</th>
+          <th>Estado</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for sale in sales %}
+        <tr>
+          <td><a href="/app/sales/{{ sale.id }}">{{ sale.number }}</a></td>
+          <td>{{ sale.time }}</td>
+          <td>{{ sale.label }}</td>
+          <td>{{ sale.type_label }}</td>
+          <td class="right">{{ sale.total }}</td>
+          <td>{{ sale.status_label }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Cierres de caja</h2>
+  {% if cash_sessions.is_empty() %}
+  <p class="muted">No hay sesiones de caja para esta fecha.</p>
+  {% else %}
+  <div class="stack">
+    {% for cash in cash_sessions %}
+    <article class="cash-report">
+      <div class="section-head">
+        <div>
+          <strong>{{ cash.device }}</strong>
+          <p class="muted small">{{ cash.opened_at }} → {{ cash.closed_at }}</p>
+        </div>
+        <span class="badge neutral">{{ cash.status_label }}</span>
+      </div>
+      <dl class="summary-grid">
+        <div><dt>Apertura {{ cash.base_currency }}</dt><dd>{{ cash.opening_base }}</dd></div>
+        <div><dt>Esperado {{ cash.base_currency }}</dt><dd>{{ cash.expected_base }}</dd></div>
+        <div><dt>Contado {{ cash.base_currency }}</dt><dd>{{ cash.counted_base }}</dd></div>
+        <div><dt>Diferencia {{ cash.base_currency }}</dt><dd>{{ cash.difference_base }}</dd></div>
+        <div><dt>Apertura {{ cash.secondary_currency }}</dt><dd>{{ cash.opening_secondary }}</dd></div>
+        <div><dt>Esperado {{ cash.secondary_currency }}</dt><dd>{{ cash.expected_secondary }}</dd></div>
+        <div><dt>Contado {{ cash.secondary_currency }}</dt><dd>{{ cash.counted_secondary }}</dd></div>
+        <div><dt>Diferencia {{ cash.secondary_currency }}</dt><dd>{{ cash.difference_secondary }}</dd></div>
+      </dl>
+    </article>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

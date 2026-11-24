@@ -31,7 +31,14 @@
   {% if common.can_kitchen %}
   <a href="/app/kitchen" class="{% if active == "kitchen" %}active{% endif %}"{% if active == "kitchen" %} aria-current="page"{% endif %}>Cocina</a>
   {% endif %}
+  {% if common.can_manage %}
+  <a href="/app/cashier" class="{% if active == "cashier" %}active{% endif %}"{% if active == "cashier" %} aria-current="page"{% endif %}>Caja</a>
+  <a href="/app/reports" class="{% if active == "reports" %}active{% endif %}"{% if active == "reports" %} aria-current="page"{% endif %}>Reportes</a>
+  {% endif %}
   <a href="/app/menu" class="{% if active == "menu" %}active{% endif %}"{% if active == "menu" %} aria-current="page"{% endif %}>Menú</a>
+  {% if common.can_admin %}
+  <a href="/app/admin" class="{% if active == "admin" %}active{% endif %}"{% if active == "admin" %} aria-current="page"{% endif %}>Admin</a>
+  {% endif %}
 </nav>
 
 <main class="layout">

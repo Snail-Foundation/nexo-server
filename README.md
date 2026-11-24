@@ -1,139 +1,156 @@
 # nexo-server
 
-Local server for **Nexo Restaurantes**: synchronization hub, PIN authentication,
-and the mobile web app used by waiters and kitchen staff.
+Local server and web app for **Nexo Restaurantes**. One local server is the
+system of record and the web app is the only client for admin, cashier, waiters,
+and kitchen. The archived desktop and Flutter projects are not part of the daily
+flow.
 
 This is an **independent project**. It consumes `nexo-core` as a local path
 dependency and never embeds the desktop application.
 
 ## Role in the product
 
-The desktop is autonomous: it bills already-synced orders without the server.
-The local server is required only by waiter and kitchen devices, which are
-mobile web browsers on the same Wi-Fi network.
-
 ```
-Waiter phone ─┐
-Kitchen screen ├─ HTTP ──> nexo-server ── sync ──> nexo-restaurant desktop
-Cashier browser┘
+Admin / cashier / waiter / kitchen browsers
+                  │ HTTP on the restaurant LAN
+                  ▼
+             nexo-server
+          (SQLite, operations,
+           projections, web app)
 ```
 
-The server runs on the cashier PC or a dedicated mini-PC. It is the same binary
-and the same URLs in both cases.
+- The server runs on the cashier PC or a dedicated mini-PC. It does not need
+  internet.
+- A cash register is a browser pointing to the server, not a second
+  installation. Multiple registers share the menu, orders, sales, and reports;
+  each browser keeps its own cash session.
+- The web app is online-only with respect to the server and shows an offline
+  message when the LAN is unavailable.
+- The legacy device sync API (`/api/link`, `/api/sync/push`, `/api/sync/pull`)
+  remains only for a cold fallback with the archived desktop. New features are
+  not built on it.
 
 ## Current state
 
 - Axum 0.8 + SQLx 0.9 (SQLite) + Askama 0.16 + HTMX, with mobile-first CSS and
   no Node build.
-- SQLite schema v5 with 25 tables: the v1 core (business, branch, device,
-  users, auth sessions, login throttling, server settings, operation log,
-  device cursors, sync anomalies, audit events), master-data projections, the
-  order projections (`restaurant_order`, `order_line`, and `order_event`), and
-  the billing projections (`sale`, `sale_line`, `payment`, `cash_session`, and
-  `cash_movement`).
+- SQLite schema v6 with 25 tables: core identity and sync, master-data
+  projections, order projections, and billing projections. Migration `0006`
+  adds `payment.tendered_minor` and `payment.change_minor`.
 - PIN login with Argon2 hashes, hashed bearer tokens, `HttpOnly` +
   `SameSite=Strict` web session cookies, CSRF validation on logout and every
   mutating form, and a persistent login throttle shared by web login, API
   login, and snapshot linking. Sessions stop working immediately when the user
   is deactivated.
 - Append-only operation log with idempotent push by operation ID and ordered
-  pull by server sequence. Accepted operations are projected into the
-  master-data, order, sale, payment, and cash read models; invalid transitions
-  are recorded as anomalies instead of being applied.
-- Snapshot linking: an empty server accepts a desktop snapshot and issues a
-  device token; a non-empty server rejects the link with a conflict. Servers
-  are never merged silently.
-- Spanish mobile web app for tables, takeout, order detail, rounds, kitchen,
-  and menu, with an online/offline banner, a live status fragment, and the
-  sold-out toggle. The shell fits all five tabs at 360 px, uses 48 px tap
-  targets, marks the active tab with `aria-current="page"`, and returns to the
-  matching list (`Mesas` or `Para llevar`) from an order. A web manifest,
-  SVG/PNG icons, and Apple touch metadata support an HTTP home-screen shortcut;
-  full PWA installation still requires HTTPS.
+  pull by server sequence. Web mutations append their operations and apply the
+  projections in one transaction.
+- Snapshot linking: an empty server accepts an archived-desktop snapshot and
+  issues a device token; a non-empty server rejects the link with a conflict.
+  Servers are never merged silently.
+- Web app for tables, takeout, order detail, rounds, kitchen, and menu, with an
+  online/offline banner, live polling, and the sold-out toggle. The shell fits
+  all tabs at 360 px, uses 48 px tap targets, marks the active tab with
+  `aria-current="page"`, and serves an embedded manifest, icons, and Apple touch
+  metadata for an HTTP home-screen shortcut.
+- Web cashier: finds billable orders, charges one or more payments in USD, VES,
+  or a mix, supports tendered/change and references, records the sale and cash
+  movements atomically, frees the table, and shows a printable receipt.
+- Web cash sessions: open, cash in/out, close, and expected/counted/difference
+  amounts per currency. Each browser has its own persistent web device and cash
+  session.
+- Web reports: daily sales, included IVA, payments by method and currency, top
+  items, cash closures, CSV download, and browser print/PDF.
+- Web admin: business name, exchange rate, optional IVA, menu categories and
+  items, tables, users and PINs, payment methods, and a consistent SQLite backup
+  download.
 - Order flow: open a free table or create a takeout order, add lines and notes,
-  send the pending round, void a line with a reason, mark lines or whole orders
-  ready and served, and refresh the kitchen board with HTMX polling every five
-  seconds.
-- Billing projections: `sale_created` inserts the sale, its lines, and its
-  payments; `order_billed` is commutative and transitions the order without
-  requiring the sale row; `payment_recorded`, `cash_session_opened`,
-  `cash_movement_recorded`, and `cash_session_closed` are idempotent; and
-  `sale_cancelled` records an audit event. Billed orders appear as "Cobrado" in
-  the web app.
+  send the pending round, void a line, mark lines or whole orders ready and
+  served, cancel an order with a reason, and refresh the order status, tables,
+  takeout list, cashier, and kitchen board with HTMX polling.
 - Role checks: `admin`, `cashier`, and `waiter` can open orders, add lines,
-  send rounds, void, and serve; `admin` and `kitchen` can mark ready. Page
-  access follows the role: tables, takeout, and order detail are for
-  `admin`/`cashier`/`waiter`; the kitchen board is for `admin`/`kitchen`; the
-  menu and sold-out toggle are available to every role. The navigation hides
-  modules the current role cannot use.
-- 51 tests, including order and billing projection folding, commutative
-  `order_billed`, rejected billing of a cancelled order, duplicate-table and
-  invalid transition anomalies, the full waiter/kitchen web flow, takeout
-  creation, login throttling across web and API, inactive-user session
-  rejection, page permissions, CSRF/role rejection, and data/session/device
-  persistence across a server restart.
-
-Cashier billing remains desktop-first: the web app displays billed orders but
-does not charge them.
+  send rounds, void, and serve; `admin` and `cashier` can bill, run cash, see
+  reports, and cancel orders; `admin` and `kitchen` can mark ready; `admin` can
+  use the admin module. The navigation hides modules the role cannot use.
+- 74 tests, including projection folding, billing arithmetic and IVA, the
+  waiter/kitchen/cashier web flow, mixed payments and change, cash sessions,
+  reports, admin writes and backup, login throttling, permissions, CSRF, and
+  data/session/device persistence across a server restart.
 
 ## Routes
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/` | Redirects to `/app` or `/login` |
-| `GET` | `/login` | PIN login page |
-| `POST` | `/login` | Validates the PIN and sets the session cookie |
+| `GET`, `POST` | `/login` | PIN login |
 | `POST` | `/logout` | Revokes the session; requires the CSRF token |
-| `GET` | `/app` | Waiter/kitchen web shell |
-| `GET` | `/app/tables` | Table grid with open orders |
+| `GET` | `/app` | Module home |
+| `GET` | `/app/tables` | Table grid with open orders; polls every 5 s |
 | `POST` | `/app/tables/{id}/open` | Opens a dine-in order for a free table |
-| `GET`, `POST` | `/app/takeout` | Lists open takeout orders and creates one |
+| `GET`, `POST` | `/app/takeout` | Lists open takeout orders and creates one; polls every 5 s |
 | `GET` | `/app/orders/{id}` | Order detail with rounds and line actions |
+| `GET` | `/app/orders/{id}/status` | Live order status fragment; polls every 5 s |
 | `POST` | `/app/orders/{id}/lines` | Adds a pending line to the current round |
 | `POST` | `/app/orders/{id}/send` | Sends the pending round to the kitchen |
 | `POST` | `/app/orders/{id}/ready` | Marks every sent line ready |
 | `POST` | `/app/orders/{id}/served` | Marks every sent or ready line served |
+| `POST` | `/app/orders/{id}/cancel` | Cancels an open order with a reason |
 | `POST` | `/app/orders/{id}/lines/{line_id}/void` | Voids a line with a reason |
 | `POST` | `/app/orders/{id}/lines/{line_id}/ready` | Marks one sent line ready |
 | `POST` | `/app/orders/{id}/lines/{line_id}/served` | Marks one line served |
+| `GET`, `POST` | `/app/orders/{id}/bill` | Billing form and sale confirmation |
+| `GET` | `/app/sales/{id}` | Printable receipt |
+| `GET` | `/app/cashier` | Cashier dashboard; polls every 5 s |
+| `GET` | `/app/cash` | Current cash session |
+| `POST` | `/app/cash/open` | Opens a cash session |
+| `POST` | `/app/cash/movements` | Records a cash in/out movement |
+| `POST` | `/app/cash/close` | Closes the session with counted amounts |
+| `GET` | `/app/reports` | Daily report |
+| `GET` | `/app/reports.csv` | Daily sales CSV (UTF-8 with BOM) |
+| `GET` | `/app/admin` | Administration page |
+| `POST` | `/app/admin/business` | Business name, exchange rate, and IVA |
+| `POST` | `/app/admin/categories` | Creates or updates a menu category |
+| `POST` | `/app/admin/items` | Creates or updates a menu item |
+| `POST` | `/app/admin/tables` | Creates or updates a dining table |
+| `POST` | `/app/admin/users` | Creates or updates a user and PIN |
+| `POST` | `/app/admin/payment-methods` | Creates or updates a payment method |
+| `GET` | `/app/admin/backup` | Downloads a consistent SQLite copy |
 | `GET` | `/app/kitchen` | Kitchen board |
 | `GET` | `/app/kitchen/board` | HTMX kitchen-board fragment |
 | `GET` | `/app/menu` | Menu read view with the sold-out toggle |
-| `POST` | `/app/menu/items/{id}/availability` | Marks an item available or sold out; requires the CSRF token |
+| `POST` | `/app/menu/items/{id}/availability` | Marks an item available or sold out |
 | `GET` | `/app/status` | HTMX status fragment |
-| `GET` | `/static/app.css` | Embedded stylesheet |
-| `GET` | `/static/htmx.min.js` | Embedded HTMX 2.0.4 |
-| `GET` | `/static/manifest.webmanifest` | Web app manifest for the home-screen shortcut |
-| `GET` | `/static/icon.svg` | Scalable application icon |
-| `GET` | `/static/icon-192.png` | 192 px application icon |
-| `GET` | `/static/icon-512.png` | 512 px application icon |
-| `GET` | `/static/apple-touch-icon.png` | Apple touch icon |
+| `GET` | `/static/*` | Embedded CSS, HTMX, manifest, and icons |
 | `GET` | `/api/health` | Liveness and database check |
 | `POST` | `/api/login` | Exchanges a PIN for an API bearer token |
-| `POST` | `/api/link` | Imports a desktop snapshot into an empty server and issues a device token |
+| `POST` | `/api/link` | Imports an archived-desktop snapshot into an empty server |
 | `POST` | `/api/sync/push` | Appends operations; requires a bearer token |
 | `GET` | `/api/sync/pull` | Pulls operations after `since`; requires a bearer token |
 
-## Linking
+## First start
 
-`POST /api/link` receives the server admin user, its PIN, and the desktop
-snapshot. The server validates the credentials and imports the snapshot only
-when its own data is empty; otherwise it returns `409 Conflict`. On success it
-returns the device ID, a device token, the business and branch IDs, and the
-last sequence.
+1. Build the release binary:
 
-After linking, the desktop admin replaces the seed `Admin` user, so the web app
-logs in with the desktop credentials. The device token authenticates push and
-pull requests, and the server only accepts operations authored by that device.
+   ```sh
+   cargo build --release
+   ```
 
-## Restart behavior
+2. Start the server once with an admin PIN:
 
-The SQLite database stores the operation log, projections, auth sessions, and
-device tokens, so they survive a server restart. Startup applies any pending
-migrations before accepting requests. `Ctrl+C` and `SIGTERM` trigger a graceful
-shutdown: in-flight requests finish, then the process exits. The web app keeps
-its session cookie, and the desktop sync client resumes from its saved cursor
-after the server comes back.
+   ```sh
+   NEXO_SERVER_DB='sqlite:///var/lib/nexo-server/nexo-server.db?mode=rwc' \
+   NEXO_ADMIN_PIN=1234 \
+   NEXO_BUSINESS_NAME='Mi Restaurante' \
+   ./target/release/nexo-server
+   ```
+
+3. Open `http://<server-ip>:8080` and log in as `Admin` with that PIN.
+4. In **Administración**, set the business name, exchange rate, optional IVA,
+   menu, tables, users, and payment methods.
+5. Open **Caja**, open the first cash session, and start service.
+
+The seed runs only when the database has no users. After creating the real
+admin users, remove `NEXO_ADMIN_PIN` from the service environment.
 
 ## Configuration
 
@@ -145,22 +162,11 @@ after the server comes back.
 | `NEXO_BUSINESS_NAME` | `Nexo Restaurantes` | Used when seeding |
 | `NEXO_SESSION_HOURS` | `12` | Session lifetime, 1 to 168 hours |
 
-The seed creates one business, a default branch named `Principal`, a server
-device, and an `Admin` user with the `admin` role. Without `NEXO_ADMIN_PIN` and
-with an empty database, web and API login stay disabled.
-
 ## Deployment
 
 The MVP is deployed as a release binary on the cashier PC or a small mini-PC,
-not as a container or an OS package. Build it on the target machine:
-
-```sh
-cargo build --release
-```
-
-The binary is `target/release/nexo-server`. Static assets (CSS, HTMX, manifest,
-and icons) are embedded, so no Node build or asset directory is needed at
-runtime.
+not as a container or an OS package. Static assets are embedded, so no Node
+build or asset directory is needed at runtime.
 
 ### Dedicated service (Linux example)
 
@@ -211,14 +217,10 @@ sudo systemctl status nexo-server
 sudo journalctl -u nexo-server -f
 ```
 
-The first start with `NEXO_ADMIN_PIN` seeds `Admin`. Link the desktop once,
-then remove the variable from the unit. Startup applies pending migrations
-automatically.
-
 ### Network
 
 - Give the server machine a fixed IP address or a DHCP reservation.
-- Allow TCP 8080 only from the restaurant LAN. For example, with UFW:
+- Allow TCP 8080 only from the restaurant LAN:
 
   ```sh
   sudo ufw allow from 192.168.1.0/24 to any port 8080 proto tcp
@@ -226,8 +228,7 @@ automatically.
 
 - Do not forward the port on the router or expose the server to the internet.
   The MVP has no TLS or reverse proxy; local HTTPS is deferred.
-- Verify from another device with
-  `curl http://<server-ip>:8080/api/health`.
+- Verify from another device with `curl http://<server-ip>:8080/api/health`.
 
 ### Updating
 
@@ -242,11 +243,13 @@ requests; restore the backup before retrying.
 ## Backup and restore
 
 The server database holds the operation log, projections, users, sessions, and
-device tokens. Back it up together with the desktop database; the desktop does
-not re-push operations that were already sent. See
-[`USER_GUIDE.md`](../USER_GUIDE.md#11-backup-and-restore) for the full routine.
+device tokens. It is the system of record, so back it up daily.
 
-With the service running, use SQLite's online backup:
+From the web app, an admin can press **Descargar respaldo** in
+**Administración**. The server uses SQLite `VACUUM INTO`, so the download is a
+consistent copy while the server keeps running.
+
+With the service running, the equivalent command is:
 
 ```sh
 sudo mkdir -p /var/backups/nexo-server
@@ -258,6 +261,8 @@ With the service stopped, a file copy is safe. Also back up the systemd unit
 and any environment file. To restore, stop the service, move the current
 database aside, copy the backup into place, remove stale `-wal` and `-shm`
 files, and start the service. Never merge two server databases by hand.
+
+See [`USER_GUIDE.md`](../USER_GUIDE.md) for the operator routine.
 
 ## Development
 
@@ -279,38 +284,28 @@ Then open `http://localhost:8080` on the same machine or
 ## Cross-project integration check
 
 `scripts/restaurant-e2e.sh` starts a throwaway server, runs
-`nexo-restaurant/examples/server_e2e.rs` against it, and verifies the whole
-slice:
-
-- The desktop creates an installation, menu, table, cash session, dine-in
-  order, and cash sale, then links and syncs with the server.
-- The server projects the order as billed, the sale and payment, the open cash
-  session, and the sale cash movement without synchronization anomalies.
-- The waiter web app logs in with the desktop admin PIN and shows the billed
-  order as `Cobrado`.
-
-Run it from this checkout with `nexo-restaurant` next to it:
+`nexo-restaurant/examples/server_e2e.rs` against it, and verifies the legacy
+cold-fallback slice. It is kept as a regression check for the archived desktop;
+the daily flow no longer depends on it.
 
 ```sh
 ./scripts/restaurant-e2e.sh
 ```
 
-It needs `curl`, `jq`, and `sqlite3`. Set `NEXO_RESTAURANT_DIR` if the desktop
-is elsewhere, `NEXO_E2E_PORT` to change the port, or `NEXO_E2E_KEEP=1` to keep
-the temporary databases. The projects stay independent: the harness only uses
-the public HTTP protocol and reads both SQLite databases for assertions.
+It needs `curl`, `jq`, and `sqlite3`. Set `NEXO_RESTAURANT_DIR` if the archived
+desktop is elsewhere, `NEXO_E2E_PORT` to change the port, or `NEXO_E2E_KEEP=1`
+to keep the temporary databases.
 
 ## Security notes
 
 - PINs are hashed with Argon2; tokens are stored as SHA-256 hashes, never in
   plain text.
 - Failed PIN attempts are counted per normalized user name in a persistent
-  one-hour window shared by web login, API login, and snapshot linking, so
-  switching channels does not reset it. Locks are progressive and applied at
-  each multiple of five failures: 5 failures lock for 1 minute, 10 for 5
-  minutes, 15 for 15 minutes, and 20 or more for 1 hour. A successful login
-  clears the counter. The web login page and API return `429 Too Many
-  Requests` with the actual remaining seconds in `Retry-After`.
+  one-hour window shared by web login, API login, and snapshot linking. Locks
+  are progressive: 5 failures lock for 1 minute, 10 for 5 minutes, 15 for 15
+  minutes, and 20 or more for 1 hour. A successful login clears the counter.
+  The web login page and API return `429 Too Many Requests` with the actual
+  remaining seconds in `Retry-After`.
 - Web sessions use `HttpOnly` and `SameSite=Strict` cookies. Logout requires the
   per-session CSRF token, and CSRF tokens are compared in constant time.
 - Sessions are checked against the user's active flag on every request, so

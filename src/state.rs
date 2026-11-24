@@ -9,6 +9,8 @@ use crate::config::Config;
 pub struct AppState {
     pub pool: SqlitePool,
     pub config: Arc<Config>,
+    /// Serializes billing so two registers cannot pick the same sale number.
+    pub billing_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -16,6 +18,7 @@ impl AppState {
         Self {
             pool,
             config: Arc::new(config),
+            billing_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }

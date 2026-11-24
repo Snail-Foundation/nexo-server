@@ -1,0 +1,16 @@
+<div
+  id="order-status"
+  class="order-status-line"
+  hx-get="/app/orders/{{ order.id }}/status"
+  hx-trigger="every 5s"
+  hx-swap="outerHTML"
+>
+  <span class="badge {{ order.status_class }}">{{ order.status_label }}</span>
+  <span class="muted">Total {{ order.total }}</span>
+  {% if order.pending_lines > 0 %}
+  <span class="badge warn">{{ order.pending_lines }} por enviar</span>
+  {% endif %}
+  {% if order.ready_lines > 0 %}
+  <span class="badge ok">{{ order.ready_lines }} listos</span>
+  {% endif %}
+</div>

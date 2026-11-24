@@ -1149,6 +1149,8 @@ struct PaymentInput {
     base_amount_minor: i64,
     exchange_rate_micros: Option<i64>,
     reference: Option<String>,
+    tendered_minor: Option<i64>,
+    change_minor: Option<i64>,
     created_at_ms: i64,
     created_by: Option<String>,
     device_id: String,
@@ -1408,6 +1410,27 @@ async fn sale_created(
             }
             None => None,
         };
+        let tendered_minor = payment
+            .get("tendered_minor")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0);
+        let change_minor = payment
+            .get("change_minor")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0);
+        if let Some(tendered) = tendered_minor {
+            if tendered < amount_minor {
+                return Ok(invalid(
+                    "the tendered amount cannot be less than the payment",
+                ));
+            }
+            if change_minor.is_some_and(|change| change != tendered - amount_minor) {
+                return Ok(invalid("the change does not match the tendered amount"));
+            }
+        } else if change_minor.is_some() {
+            return Ok(invalid("change requires a tendered amount"));
+        }
+
         let payment_device_id = resolve_device(transaction, payment, operation.device_id).await?;
         let payment_created_by = optional_user(transaction, payment, "created_by").await?;
         let payment_created_at_ms = payment
@@ -1429,6 +1452,8 @@ async fn sale_created(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned),
+            tendered_minor,
+            change_minor,
             created_at_ms: payment_created_at_ms,
             created_by: payment_created_by,
             device_id: payment_device_id,
@@ -1494,8 +1519,11 @@ async fn sale_created(
             "INSERT INTO payment (
                 id, business_id, sale_id, method_id, amount_minor, currency,
                 base_amount_minor, exchange_rate_micros, reference,
-                created_at_ms, created_by, device_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                tendered_minor, change_minor, created_at_ms, created_by,
+                device_id
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+             )",
         )
         .bind(&payment.id)
         .bind(&business_id)
@@ -1506,6 +1534,8 @@ async fn sale_created(
         .bind(payment.base_amount_minor)
         .bind(payment.exchange_rate_micros)
         .bind(payment.reference.as_deref())
+        .bind(payment.tendered_minor)
+        .bind(payment.change_minor)
         .bind(payment.created_at_ms)
         .bind(payment.created_by.as_deref())
         .bind(&payment.device_id)
@@ -1633,6 +1663,21 @@ async fn payment_recorded(
         }
         None => None,
     };
+    let tendered_minor = integer(payload, "tendered_minor").filter(|value| *value > 0);
+    let change_minor = integer(payload, "change_minor").filter(|value| *value >= 0);
+    if let Some(tendered) = tendered_minor {
+        if tendered < amount_minor {
+            return Ok(invalid(
+                "the tendered amount cannot be less than the payment",
+            ));
+        }
+        if change_minor.is_some_and(|change| change != tendered - amount_minor) {
+            return Ok(invalid("the change does not match the tendered amount"));
+        }
+    } else if change_minor.is_some() {
+        return Ok(invalid("change requires a tendered amount"));
+    }
+
     let device_id = resolve_device(transaction, payload, operation.device_id).await?;
     let created_by = optional_user(transaction, payload, "created_by").await?;
     let created_at_ms = integer(payload, "created_at_ms").unwrap_or(operation.created_at_ms);
@@ -1641,8 +1686,11 @@ async fn payment_recorded(
         "INSERT INTO payment (
             id, business_id, sale_id, method_id, amount_minor, currency,
             base_amount_minor, exchange_rate_micros, reference,
-            created_at_ms, created_by, device_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            tendered_minor, change_minor, created_at_ms, created_by,
+            device_id
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+         )",
     )
     .bind(&payment_id)
     .bind(&business_id)
@@ -1653,6 +1701,8 @@ async fn payment_recorded(
     .bind(base_amount_minor)
     .bind(exchange_rate_micros)
     .bind(optional_text(payload, "reference"))
+    .bind(tendered_minor)
+    .bind(change_minor)
     .bind(created_at_ms)
     .bind(created_by.as_deref())
     .bind(&device_id)

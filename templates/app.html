@@ -28,14 +28,20 @@
     <p>Platos y agotados</p>
   </a>
   {% if common.can_manage %}
-  <article class="module">
+  <a class="module link" href="/app/cashier">
     <h2>Caja</h2>
-    <p>Próxima fase</p>
-  </article>
-  <article class="module">
+    <p>Cobros y sesión de caja</p>
+  </a>
+  <a class="module link" href="/app/reports">
     <h2>Reportes</h2>
-    <p>Próxima fase</p>
-  </article>
+    <p>Ventas, pagos y cierres</p>
+  </a>
+  {% endif %}
+  {% if common.can_admin %}
+  <a class="module link" href="/app/admin">
+    <h2>Administración</h2>
+    <p>Menú, mesas, usuarios y ajustes</p>
+  </a>
   {% endif %}
 </section>
 

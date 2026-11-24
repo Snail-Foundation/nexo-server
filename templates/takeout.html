@@ -18,7 +18,14 @@
   </form>
 </section>
 
-<section class="card">
+<section
+  id="takeout-orders"
+  class="card"
+  hx-get="/app/takeout"
+  hx-trigger="every 5s"
+  hx-select="#takeout-orders"
+  hx-swap="outerHTML"
+>
   <h2>Pedidos abiertos</h2>
   {% if orders.is_empty() %}
   <p class="muted">No hay pedidos para llevar.</p>

@@ -1,0 +1,395 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<section class="hero order-hero">
+  <div>
+    <p class="eyebrow">Administración</p>
+    <h1>Configuración</h1>
+    <p class="muted">Menú, mesas, usuarios, pagos y ajustes del negocio.</p>
+  </div>
+  <a class="button-link ghost" href="/app/admin/backup">Descargar respaldo</a>
+</section>
+
+<section class="card" id="business">
+  <h2>Negocio y caja</h2>
+  <form method="post" action="/app/admin/business" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <label class="field">
+      <span>Nombre del negocio</span>
+      <input name="name" value="{{ business_name }}" required autocomplete="organization">
+    </label>
+    <div class="field-row">
+      <label class="field grow">
+        <span>Razón social (opcional)</span>
+        <input name="legal_name" value="{{ legal_name }}" autocomplete="off">
+      </label>
+      <label class="field grow">
+        <span>RIF / documento (opcional)</span>
+        <input name="tax_id" value="{{ tax_id }}" autocomplete="off">
+      </label>
+    </div>
+    <div class="field-row">
+      <label class="field grow">
+        <span>Tasa de cambio ({{ base_currency }} → moneda secundaria)</span>
+        <input name="exchange_rate" value="{{ exchange_rate }}" inputmode="decimal" placeholder="Ej. 36.50" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>{{ tax_name }}</span>
+        <input name="tax_name" value="{{ tax_name }}" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Tasa de IVA (%)</span>
+        <input name="tax_rate" value="{{ tax_rate }}" inputmode="decimal" placeholder="16" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>IVA</span>
+        <select name="tax_enabled">
+          <option value="true"{% if tax_enabled %} selected{% endif %}>Activado</option>
+          <option value="false"{% if !tax_enabled %} selected{% endif %}>Desactivado</option>
+        </select>
+      </label>
+    </div>
+    <p class="muted small">
+      Los precios del menú ya incluyen IVA cuando está activado. La tasa de cambio
+      se usa para pagos en la moneda secundaria.
+    </p>
+    <button class="primary" type="submit">Guardar ajustes</button>
+  </form>
+</section>
+
+<details class="card admin-section" id="menu" open>
+  <summary><strong>Menú</strong></summary>
+
+  <h2>Categorías</h2>
+  {% if categories.is_empty() %}
+  <p class="muted">Todavía no hay categorías.</p>
+  {% else %}
+  <div class="admin-list">
+    {% for category in categories %}
+    <div class="admin-row">
+      <div>
+        <strong>{{ category.name }}</strong>
+        <span class="muted small">Orden {{ category.sort_order }}</span>
+      </div>
+      {% if category.is_active %}
+      <span class="badge ok">Activa</span>
+      {% else %}
+      <span class="badge off">Inactiva</span>
+      {% endif %}
+      <a class="button-link ghost compact" href="/app/admin?edit_category={{ category.id }}#menu">Editar</a>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <form method="post" action="/app/admin/categories" class="stack admin-form">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <input type="hidden" name="id" value="{{ category_form.id }}">
+    <h3>{% if category_form.id.is_empty() %}Nueva categoría{% else %}Editar categoría{% endif %}</h3>
+    <div class="field-row">
+      <label class="field grow">
+        <span>Nombre</span>
+        <input name="name" value="{{ category_form.name }}" required autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Orden</span>
+        <input name="sort_order" value="{{ category_form.sort_order }}" inputmode="numeric" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Estado</span>
+        <select name="is_active">
+          <option value="true"{% if category_form.is_active %} selected{% endif %}>Activa</option>
+          <option value="false"{% if !category_form.is_active %} selected{% endif %}>Inactiva</option>
+        </select>
+      </label>
+    </div>
+    <div class="actions">
+      <button class="primary" type="submit">{% if category_form.id.is_empty() %}Agregar categoría{% else %}Guardar categoría{% endif %}</button>
+      {% if !category_form.id.is_empty() %}
+      <a class="button-link ghost" href="/app/admin#menu">Cancelar</a>
+      {% endif %}
+    </div>
+  </form>
+
+  <h2>Platos</h2>
+  {% if items.is_empty() %}
+  <p class="muted">Todavía no hay platos.</p>
+  {% else %}
+  <div class="admin-list">
+    {% for item in items %}
+    <div class="admin-row">
+      <div>
+        <strong>{{ item.name }}</strong>
+        <span class="muted small">{{ item.category }}{% if !item.description.is_empty() %} · {{ item.description }}{% endif %}</span>
+      </div>
+      <span class="price">{{ item.price }}</span>
+      <div class="admin-badges">
+        {% if item.is_active %}
+        <span class="badge ok">Activo</span>
+        {% else %}
+        <span class="badge off">Inactivo</span>
+        {% endif %}
+        {% if item.is_available %}
+        <span class="badge neutral">Disponible</span>
+        {% else %}
+        <span class="badge warn">Agotado</span>
+        {% endif %}
+      </div>
+      <a class="button-link ghost compact" href="/app/admin?edit_item={{ item.id }}#menu">Editar</a>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <form method="post" action="/app/admin/items" class="stack admin-form">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <input type="hidden" name="id" value="{{ item_form.id }}">
+    <h3>{% if item_form.id.is_empty() %}Nuevo plato{% else %}Editar plato{% endif %}</h3>
+    <div class="field-row">
+      <label class="field grow">
+        <span>Nombre</span>
+        <input name="name" value="{{ item_form.name }}" required autocomplete="off">
+      </label>
+      <label class="field grow">
+        <span>Categoría</span>
+        <select name="category_id">
+          <option value="">Sin categoría</option>
+          {% for category in categories %}
+          <option value="{{ category.id }}"{% if item_form.category_id == category.id %} selected{% endif %}>{{ category.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <label class="field">
+      <span>Descripción (opcional)</span>
+      <input name="description" value="{{ item_form.description }}" autocomplete="off">
+    </label>
+    <div class="field-row">
+      <label class="field">
+        <span>Precio ({{ base_currency }}, IVA incluido)</span>
+        <input name="price" value="{{ item_form.price }}" inputmode="decimal" placeholder="0.00" required autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Orden</span>
+        <input name="sort_order" value="{{ item_form.sort_order }}" inputmode="numeric" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Estado</span>
+        <select name="is_active">
+          <option value="true"{% if item_form.is_active %} selected{% endif %}>Activo</option>
+          <option value="false"{% if !item_form.is_active %} selected{% endif %}>Inactivo</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Disponibilidad</span>
+        <select name="is_available">
+          <option value="true"{% if item_form.is_available %} selected{% endif %}>Disponible</option>
+          <option value="false"{% if !item_form.is_available %} selected{% endif %}>Agotado</option>
+        </select>
+      </label>
+    </div>
+    <div class="actions">
+      <button class="primary" type="submit">{% if item_form.id.is_empty() %}Agregar plato{% else %}Guardar plato{% endif %}</button>
+      {% if !item_form.id.is_empty() %}
+      <a class="button-link ghost" href="/app/admin#menu">Cancelar</a>
+      {% endif %}
+    </div>
+  </form>
+</details>
+
+<details class="card admin-section" id="tables">
+  <summary><strong>Mesas</strong></summary>
+  {% if tables.is_empty() %}
+  <p class="muted">Todavía no hay mesas.</p>
+  {% else %}
+  <div class="admin-list">
+    {% for table in tables %}
+    <div class="admin-row">
+      <div>
+        <strong>{{ table.name }}</strong>
+        <span class="muted small">{{ table.zone }}</span>
+      </div>
+      {% if table.occupied %}
+      <span class="badge ok">Ocupada</span>
+      {% else %}
+      <span class="badge neutral">Libre</span>
+      {% endif %}
+      {% if table.is_active %}
+      <span class="badge ok">Activa</span>
+      {% else %}
+      <span class="badge off">Inactiva</span>
+      {% endif %}
+      <a class="button-link ghost compact" href="/app/admin?edit_table={{ table.id }}#tables">Editar</a>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <form method="post" action="/app/admin/tables" class="stack admin-form">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <input type="hidden" name="id" value="{{ table_form.id }}">
+    <h3>{% if table_form.id.is_empty() %}Nueva mesa{% else %}Editar mesa{% endif %}</h3>
+    <div class="field-row">
+      <label class="field grow">
+        <span>Nombre</span>
+        <input name="name" value="{{ table_form.name }}" required autocomplete="off">
+      </label>
+      <label class="field grow">
+        <span>Zona (opcional)</span>
+        <input name="zone" value="{{ table_form.zone }}" placeholder="Salón, terraza…" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Estado</span>
+        <select name="is_active">
+          <option value="true"{% if table_form.is_active %} selected{% endif %}>Activa</option>
+          <option value="false"{% if !table_form.is_active %} selected{% endif %}>Inactiva</option>
+        </select>
+      </label>
+    </div>
+    <div class="actions">
+      <button class="primary" type="submit">{% if table_form.id.is_empty() %}Agregar mesa{% else %}Guardar mesa{% endif %}</button>
+      {% if !table_form.id.is_empty() %}
+      <a class="button-link ghost" href="/app/admin#tables">Cancelar</a>
+      {% endif %}
+    </div>
+  </form>
+</details>
+
+<details class="card admin-section" id="users">
+  <summary><strong>Usuarios</strong></summary>
+  {% if users.is_empty() %}
+  <p class="muted">Todavía no hay usuarios.</p>
+  {% else %}
+  <div class="admin-list">
+    {% for user in users %}
+    <div class="admin-row">
+      <div>
+        <strong>{{ user.name }}</strong>
+        <span class="muted small">{{ user.role_label }}{% if !user.has_pin %} · Sin PIN{% endif %}</span>
+      </div>
+      {% if user.is_active %}
+      <span class="badge ok">Activo</span>
+      {% else %}
+      <span class="badge off">Inactivo</span>
+      {% endif %}
+      <a class="button-link ghost compact" href="/app/admin?edit_user={{ user.id }}#users">Editar</a>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <form method="post" action="/app/admin/users" class="stack admin-form">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <input type="hidden" name="id" value="{{ user_form.id }}">
+    <h3>{% if user_form.id.is_empty() %}Nuevo usuario{% else %}Editar usuario{% endif %}</h3>
+    <div class="field-row">
+      <label class="field grow">
+        <span>Nombre</span>
+        <input name="display_name" value="{{ user_form.name }}" required autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Rol</span>
+        <select name="role">
+          <option value="admin"{% if user_form.role == "admin" %} selected{% endif %}>Administrador</option>
+          <option value="cashier"{% if user_form.role == "cashier" %} selected{% endif %}>Cajero</option>
+          <option value="waiter"{% if user_form.role == "waiter" %} selected{% endif %}>Mesonero</option>
+          <option value="kitchen"{% if user_form.role == "kitchen" %} selected{% endif %}>Cocina</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>PIN{% if !user_form.id.is_empty() %} (vacío = mantener){% endif %}</span>
+        <input name="pin" inputmode="numeric" pattern="[0-9]*" minlength="4" maxlength="8" autocomplete="off"{% if user_form.id.is_empty() %} required{% endif %}>
+      </label>
+      <label class="field">
+        <span>Estado</span>
+        <select name="is_active">
+          <option value="true"{% if user_form.is_active %} selected{% endif %}>Activo</option>
+          <option value="false"{% if !user_form.is_active %} selected{% endif %}>Inactivo</option>
+        </select>
+      </label>
+    </div>
+    <div class="actions">
+      <button class="primary" type="submit">{% if user_form.id.is_empty() %}Agregar usuario{% else %}Guardar usuario{% endif %}</button>
+      {% if !user_form.id.is_empty() %}
+      <a class="button-link ghost" href="/app/admin#users">Cancelar</a>
+      {% endif %}
+    </div>
+  </form>
+</details>
+
+<details class="card admin-section" id="payments">
+  <summary><strong>Métodos de pago</strong></summary>
+  {% if methods.is_empty() %}
+  <p class="muted">Todavía no hay métodos de pago.</p>
+  {% else %}
+  <div class="admin-list">
+    {% for method in methods %}
+    <div class="admin-row">
+      <div>
+        <strong>{{ method.name }}</strong>
+        <span class="muted small">{{ method.kind_label }}{% if !method.currency.is_empty() %} · Solo {{ method.currency }}{% endif %} · Orden {{ method.sort_order }}</span>
+      </div>
+      {% if method.is_active %}
+      <span class="badge ok">Activo</span>
+      {% else %}
+      <span class="badge off">Inactivo</span>
+      {% endif %}
+      <a class="button-link ghost compact" href="/app/admin?edit_method={{ method.id }}#payments">Editar</a>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <form method="post" action="/app/admin/payment-methods" class="stack admin-form">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <input type="hidden" name="id" value="{{ method_form.id }}">
+    <h3>{% if method_form.id.is_empty() %}Nuevo método{% else %}Editar método{% endif %}</h3>
+    <div class="field-row">
+      <label class="field grow">
+        <span>Nombre</span>
+        <input name="name" value="{{ method_form.name }}" required autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Tipo</span>
+        <select name="kind">
+          <option value="cash"{% if method_form.kind == "cash" %} selected{% endif %}>Efectivo</option>
+          <option value="card"{% if method_form.kind == "card" %} selected{% endif %}>Tarjeta</option>
+          <option value="transfer"{% if method_form.kind == "transfer" %} selected{% endif %}>Transferencia</option>
+          <option value="mobile_payment"{% if method_form.kind == "mobile_payment" %} selected{% endif %}>Pago móvil</option>
+          <option value="other"{% if method_form.kind == "other" %} selected{% endif %}>Otro</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Moneda (vacío = cualquiera)</span>
+        <input name="currency" value="{{ method_form.currency }}" maxlength="3" placeholder="USD" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Orden</span>
+        <input name="sort_order" value="{{ method_form.sort_order }}" inputmode="numeric" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Estado</span>
+        <select name="is_active">
+          <option value="true"{% if method_form.is_active %} selected{% endif %}>Activo</option>
+          <option value="false"{% if !method_form.is_active %} selected{% endif %}>Inactivo</option>
+        </select>
+      </label>
+    </div>
+    <div class="actions">
+      <button class="primary" type="submit">{% if method_form.id.is_empty() %}Agregar método{% else %}Guardar método{% endif %}</button>
+      {% if !method_form.id.is_empty() %}
+      <a class="button-link ghost" href="/app/admin#payments">Cancelar</a>
+      {% endif %}
+    </div>
+  </form>
+</details>
+
+<section class="card">
+  <h2>Respaldo</h2>
+  <p class="muted">
+    Descarga una copia consistente de la base de datos. Guárdala fuera del
+    servidor y hazlo al menos una vez al día.
+  </p>
+  <a class="button-link" href="/app/admin/backup">Descargar respaldo</a>
+</section>
+{% endblock %}

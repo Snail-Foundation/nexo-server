@@ -202,57 +202,101 @@ pub async fn append_web_operation(
     action: &str,
     details: Value,
 ) -> Result<(), AppError> {
-    operation
-        .validate()
-        .map_err(|error| AppError::Validation(error.to_string()))?;
+    append_web_operations(
+        pool,
+        vec![WebOperation {
+            operation: operation.clone(),
+            action: action.to_owned(),
+            details,
+        }],
+        actor_user_id,
+        business_id,
+        branch_id,
+    )
+    .await
+}
 
-    let payload = serde_json::to_string(&operation.payload)?;
+/// One operation written by the web app, with its audit action and details.
+pub struct WebOperation {
+    pub operation: Operation,
+    pub action: String,
+    pub details: Value,
+}
+
+/// Appends a group of web operations atomically.
+///
+/// Billing needs `sale_created`, `order_billed`, and the cash movements to be
+/// committed together: a partial commit would leave an order billed without a
+/// sale or a sale without its cash movement.
+pub async fn append_web_operations(
+    pool: &SqlitePool,
+    operations: Vec<WebOperation>,
+    actor_user_id: &str,
+    business_id: &str,
+    branch_id: Option<&str>,
+) -> Result<(), AppError> {
+    if operations.is_empty() {
+        return Ok(());
+    }
+
+    for entry in &operations {
+        entry
+            .operation
+            .validate()
+            .map_err(|error| AppError::Validation(error.to_string()))?;
+    }
+
     let now = now_ms();
     let mut transaction = pool.begin().await?;
 
-    sqlx::query(
-        "INSERT INTO operation_log (
-            id, device_id, branch_id, kind, entity_id, payload,
-            schema_version, created_at_ms, received_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-    )
-    .bind(operation.id.to_string())
-    .bind(operation.device_id.to_string())
-    .bind(operation.branch_id.map(|branch_id| branch_id.to_string()))
-    .bind(operation.kind.as_str())
-    .bind(operation.entity_id.to_string())
-    .bind(payload)
-    .bind(i64::from(operation.schema_version))
-    .bind(operation.created_at_ms)
-    .bind(now)
-    .execute(&mut *transaction)
-    .await?;
+    for entry in &operations {
+        let operation = &entry.operation;
+        let payload = serde_json::to_string(&operation.payload)?;
 
-    match projection::apply(&mut transaction, operation).await? {
-        ProjectionOutcome::Applied | ProjectionOutcome::Ignored => {}
-        ProjectionOutcome::Skipped(reason) => {
-            return Err(AppError::Validation(reason));
+        sqlx::query(
+            "INSERT INTO operation_log (
+                id, device_id, branch_id, kind, entity_id, payload,
+                schema_version, created_at_ms, received_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(operation.id.to_string())
+        .bind(operation.device_id.to_string())
+        .bind(operation.branch_id.map(|branch_id| branch_id.to_string()))
+        .bind(operation.kind.as_str())
+        .bind(operation.entity_id.to_string())
+        .bind(payload)
+        .bind(i64::from(operation.schema_version))
+        .bind(operation.created_at_ms)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+
+        match projection::apply(&mut transaction, operation).await? {
+            ProjectionOutcome::Applied | ProjectionOutcome::Ignored => {}
+            ProjectionOutcome::Skipped(reason) => {
+                return Err(AppError::Validation(reason));
+            }
         }
-    }
 
-    sqlx::query(
-        "INSERT INTO audit_event (
-            id, business_id, branch_id, actor_user_id, device_id, action,
-            entity_type, entity_id, details, created_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-    )
-    .bind(Uuid::now_v7().to_string())
-    .bind(business_id)
-    .bind(branch_id)
-    .bind(actor_user_id)
-    .bind(operation.device_id.to_string())
-    .bind(action)
-    .bind(operation.kind.as_str())
-    .bind(operation.entity_id.to_string())
-    .bind(serde_json::to_string(&details)?)
-    .bind(now)
-    .execute(&mut *transaction)
-    .await?;
+        sqlx::query(
+            "INSERT INTO audit_event (
+                id, business_id, branch_id, actor_user_id, device_id, action,
+                entity_type, entity_id, details, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(business_id)
+        .bind(branch_id)
+        .bind(actor_user_id)
+        .bind(operation.device_id.to_string())
+        .bind(&entry.action)
+        .bind(operation.kind.as_str())
+        .bind(operation.entity_id.to_string())
+        .bind(serde_json::to_string(&entry.details)?)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+    }
 
     transaction.commit().await?;
 

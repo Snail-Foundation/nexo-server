@@ -1,0 +1,78 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<section class="hero order-hero no-print">
+  <div>
+    <p class="eyebrow">Venta {{ sale.number }}</p>
+    <h1>Ticket</h1>
+    <p class="muted">{{ sale.created_at }} · {{ sale.cashier }}</p>
+  </div>
+  <div class="actions">
+    <a class="button-link ghost" href="/app/cashier">Volver a caja</a>
+    <button class="primary" type="button" onclick="window.print()">Imprimir / PDF</button>
+  </div>
+</section>
+
+<article class="receipt">
+  <header class="receipt-head">
+    <h2>{{ sale.business_name }}</h2>
+    <p class="muted">Ticket {{ sale.number }}</p>
+    <p class="muted">{{ sale.created_at }}</p>
+  </header>
+
+  <dl class="receipt-meta">
+    <div><dt>Pedido</dt><dd>{{ sale.order_label }}</dd></div>
+    <div><dt>Código</dt><dd>{{ sale.display_code }}</dd></div>
+    <div><dt>Cajero</dt><dd>{{ sale.cashier }}</dd></div>
+    <div><dt>Estado</dt><dd>{{ sale.status_label }}</dd></div>
+  </dl>
+
+  <table class="receipt-table">
+    <thead>
+      <tr><th>Cant.</th><th>Descripción</th><th class="right">Total</th></tr>
+    </thead>
+    <tbody>
+      {% for line in sale.lines %}
+      <tr>
+        <td>{{ line.quantity }}</td>
+        <td>{{ line.description }}</td>
+        <td class="right">{{ line.total }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <dl class="receipt-totals">
+    {% if sale.has_tax %}
+    <div><dt>Subtotal</dt><dd>{{ sale.subtotal }}</dd></div>
+    <div><dt>{{ sale.tax_label }}</dt><dd>{{ sale.tax }}</dd></div>
+    {% endif %}
+    <div class="receipt-total"><dt>Total</dt><dd>{{ sale.total }}</dd></div>
+  </dl>
+
+  <section class="receipt-payments">
+    <h3>Pagos</h3>
+    {% for payment in sale.payments %}
+    <div class="receipt-payment">
+      <div>
+        <strong>{{ payment.method }}</strong>
+        {% if !payment.reference.is_empty() %}
+        <span class="muted"> · {{ payment.reference }}</span>
+        {% endif %}
+        {% if !payment.exchange_rate.is_empty() %}
+        <span class="muted"> · Tasa {{ payment.exchange_rate }}</span>
+        {% endif %}
+      </div>
+      <div class="right">
+        <div>{{ payment.amount }}</div>
+        {% if !payment.change.is_empty() %}
+        <div class="muted small">Recibido {{ payment.tendered }} · Cambio {{ payment.change }}</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </section>
+
+  <p class="receipt-thanks">Gracias por su compra.</p>
+</article>
+{% endblock %}

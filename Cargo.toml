@@ -13,6 +13,7 @@ askama = "0.16"
 axum = "0.8"
 axum-extra = { version = "0.12", features = ["cookie"] }
 chrono = "0.4"
+form_urlencoded = "1"
 hex = "0.4"
 nexo-core = { path = "../nexo-core" }
 rand_core = { version = "0.6", features = ["getrandom"] }
@@ -26,7 +27,15 @@ sqlx = { version = "0.9", default-features = false, features = [
     "macros",
 ] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+time = "0.3"
+tokio = { version = "1", features = [
+    "fs",
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "signal",
+    "sync",
+] }
 tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,0 +1,134 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<section class="hero order-hero">
+  <div>
+    <p class="eyebrow">Caja</p>
+    <h1>Sesión de caja</h1>
+    <p class="muted">Apertura, movimientos y cuadre del turno.</p>
+  </div>
+  <a class="button-link ghost" href="/app/cashier">Volver a cobrar</a>
+</section>
+
+{% match session %}
+{% when Some with (cash) %}
+<section class="card session-card">
+  <div class="section-head">
+    <div>
+      <h2>Caja abierta</h2>
+      <p class="muted">Desde {{ cash.opened_at }} · {{ cash.opened_by }}</p>
+    </div>
+    <span class="badge ok">{{ cash.status_label }}</span>
+  </div>
+  <dl class="summary-grid">
+    <div><dt>Apertura {{ cash.base_currency }}</dt><dd>{{ cash.opening_base }}</dd></div>
+    <div><dt>Apertura {{ cash.secondary_currency }}</dt><dd>{{ cash.opening_secondary }}</dd></div>
+    <div><dt>Esperado {{ cash.base_currency }}</dt><dd>{{ cash.expected_base }}</dd></div>
+    <div><dt>Esperado {{ cash.secondary_currency }}</dt><dd>{{ cash.expected_secondary }}</dd></div>
+  </dl>
+</section>
+
+<section class="card">
+  <h2>Movimientos</h2>
+  {% if cash.movements.is_empty() %}
+  <p class="muted">Todavía no hay movimientos en este turno.</p>
+  {% else %}
+  <ul class="line-list">
+    {% for movement in cash.movements %}
+    <li class="order-line">
+      <div class="line-main">
+        <strong>{{ movement.kind_label }}</strong>
+        {% if !movement.reason.is_empty() %}
+        <span class="muted">{{ movement.reason }}</span>
+        {% endif %}
+        <span class="muted small">{{ movement.created_at }}</span>
+      </div>
+      <span class="price">{{ movement.amount }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Registrar movimiento</h2>
+  <form method="post" action="/app/cash/movements" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <div class="field-row">
+      <label class="field">
+        <span>Tipo</span>
+        <select name="kind">
+          <option value="in">Entrada</option>
+          <option value="out">Salida</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Moneda</span>
+        <select name="currency">
+          <option value="{{ base_currency }}">{{ base_currency }}</option>
+          <option value="{{ secondary_currency }}">{{ secondary_currency }}</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Monto</span>
+        <input name="amount" inputmode="decimal" placeholder="0.00" required autocomplete="off">
+      </label>
+    </div>
+    <label class="field">
+      <span>Motivo</span>
+      <input name="reason" placeholder="Propina, gasto, retiro…" autocomplete="off">
+    </label>
+    <button class="primary" type="submit">Registrar movimiento</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Cerrar caja</h2>
+  <p class="muted">
+    Cuenta el efectivo de cada gaveta. El sistema compara con lo esperado y
+    registra la diferencia.
+  </p>
+  <form method="post" action="/app/cash/close" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <div class="field-row">
+      <label class="field">
+        <span>Contado {{ base_currency }}</span>
+        <input name="counted_base" inputmode="decimal" placeholder="0.00" required autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Contado {{ secondary_currency }}</span>
+        <input name="counted_secondary" inputmode="decimal" placeholder="0.00" required autocomplete="off">
+      </label>
+    </div>
+    <label class="field">
+      <span>Notas</span>
+      <input name="notes" placeholder="Opcional" autocomplete="off">
+    </label>
+    <button class="danger" type="submit">Cerrar caja</button>
+  </form>
+</section>
+{% when None %}
+<section class="card notice">
+  <h2>Abrir caja</h2>
+  <p class="muted">Registra el fondo inicial de cada gaveta para empezar el turno.</p>
+  <form method="post" action="/app/cash/open" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <div class="field-row">
+      <label class="field">
+        <span>Fondo inicial {{ base_currency }}</span>
+        <input name="opening_base" inputmode="decimal" value="0.00" required autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Fondo inicial {{ secondary_currency }}</span>
+        <input name="opening_secondary" inputmode="decimal" value="0.00" required autocomplete="off">
+      </label>
+    </div>
+    <label class="field">
+      <span>Notas</span>
+      <input name="notes" placeholder="Opcional" autocomplete="off">
+    </label>
+    <button class="primary" type="submit">Abrir caja</button>
+  </form>
+</section>
+{% endmatch %}
+{% endblock %}

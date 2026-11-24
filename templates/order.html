@@ -6,9 +6,9 @@
     <p class="eyebrow">{{ order.order_type_label }} · {{ order.display_code }}</p>
     <h1>{{ order.label }}</h1>
     <p class="muted">
-      Abierto {{ order.opened_at }} ·
-      <span class="badge {{ order.status_class }}">{{ order.status_label }}</span>
+      Abierto {{ order.opened_at }}
     </p>
+    {% include "_order_status.html" %}
   </div>
   <a class="button-link ghost" href="{{ order.back_href }}">{{ order.back_label }}</a>
 </section>
@@ -119,5 +119,22 @@
   </form>
   {% endif %}
 </section>
+{% endif %}
+{% if order.can_cancel %}
+<details class="card danger-zone">
+  <summary>Cancelar pedido</summary>
+  <form method="post" action="/app/orders/{{ order.id }}/cancel" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <label class="field">
+      <span>Motivo de la cancelación</span>
+      <input name="reason" placeholder="Cliente se retiró, error de captura…" required autocomplete="off">
+    </label>
+    <p class="muted small">
+      La cancelación queda registrada y libera la mesa. Un pedido cobrado no se
+      puede cancelar.
+    </p>
+    <button class="danger" type="submit">Cancelar pedido</button>
+  </form>
+</details>
 {% endif %}
 {% endblock %}

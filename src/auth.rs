@@ -16,6 +16,9 @@ use crate::time::now_ms;
 /// Name of the web session cookie.
 pub const SESSION_COOKIE: &str = "nexo_session";
 
+/// Name of the cookie that identifies one browser as a cash register.
+pub const WEB_DEVICE_COOKIE: &str = "nexo_web_device";
+
 /// Failed PIN attempts allowed before the first lock.
 pub const LOGIN_MAX_FAILURES: i64 = 5;
 
@@ -552,6 +555,100 @@ pub fn removal_cookie() -> Cookie<'static> {
         .same_site(SameSite::Strict)
         .path("/")
         .build()
+}
+
+/// Returns the device that represents this browser as a cash register.
+///
+/// A browser keeps its device in a long-lived cookie so its cash session
+/// survives page reloads and logins. If the cookie is missing or does not
+/// belong to the business, a new web device is created.
+pub async fn resolve_web_device(
+    pool: &SqlitePool,
+    jar: &CookieJar,
+    session: &SessionUser,
+) -> Result<(String, Option<Cookie<'static>>), AppError> {
+    if let Some(cookie) = jar.get(WEB_DEVICE_COOKIE) {
+        let device_id = cookie.value().to_owned();
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM device
+                WHERE id = ?1 AND business_id = ?2 AND kind = 'web'
+             )",
+        )
+        .bind(&device_id)
+        .bind(&session.business_id)
+        .fetch_one(pool)
+        .await?;
+
+        if valid {
+            let now = now_ms();
+            sqlx::query("UPDATE device SET last_seen_at_ms = ?2 WHERE id = ?1")
+                .bind(&device_id)
+                .bind(now)
+                .execute(pool)
+                .await?;
+            sqlx::query("UPDATE auth_session SET device_id = ?2 WHERE id = ?1")
+                .bind(&session.session_id)
+                .bind(&device_id)
+                .execute(pool)
+                .await?;
+            return Ok((device_id, None));
+        }
+    }
+
+    let device_id = create_web_device(pool, &session.business_id, &session.session_id).await?;
+
+    let cookie = Cookie::build((WEB_DEVICE_COOKIE, device_id.to_string()))
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .path("/")
+        .max_age(time::Duration::days(365))
+        .build();
+
+    Ok((device_id.to_string(), Some(cookie)))
+}
+
+/// Creates a web device for a browser and attaches it to the session.
+///
+/// The caller decides whether the device is also stored in a cookie. This is
+/// used for new logins and for sessions created before web devices existed.
+pub async fn create_web_device(
+    pool: &SqlitePool,
+    business_id: &str,
+    session_id: &str,
+) -> Result<DeviceId, AppError> {
+    let device_id = DeviceId::new();
+    let branch_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM branch
+         WHERE business_id = ?1
+         ORDER BY is_default DESC, created_at_ms
+         LIMIT 1",
+    )
+    .bind(business_id)
+    .fetch_optional(pool)
+    .await?;
+    let now = now_ms();
+
+    sqlx::query(
+        "INSERT INTO device (
+            id, business_id, branch_id, name, kind, is_master, registered_at_ms,
+            last_seen_at_ms
+         ) VALUES (?1, ?2, ?3, 'Caja web', 'web', 0, ?4, ?4)",
+    )
+    .bind(device_id.to_string())
+    .bind(business_id)
+    .bind(branch_id)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    sqlx::query("UPDATE auth_session SET device_id = ?2 WHERE id = ?1")
+        .bind(session_id)
+        .bind(device_id.to_string())
+        .execute(pool)
+        .await?;
+
+    Ok(device_id)
 }
 
 /// Returns true when the submitted CSRF token matches the session.

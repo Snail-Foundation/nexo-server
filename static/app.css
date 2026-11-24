@@ -247,6 +247,10 @@ button.ghost:hover {
     calc(32px + env(safe-area-inset-bottom));
 }
 
+.layout > section + section {
+  margin-top: 14px;
+}
+
 .hero h1 {
   margin: 0 0 4px;
   font-size: clamp(22px, 5vw, 30px);
@@ -629,6 +633,13 @@ button.danger {
   margin: 0;
 }
 
+.order-status-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 .order-line {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -841,4 +852,432 @@ button.danger {
   .void-form {
     grid-column: 1 / -1;
   }
+}
+
+/* Cashier, cash session, and receipt. */
+
+.small {
+  font-size: 12px;
+}
+
+.notice-text {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #b54708;
+  background: #fffaeb;
+  border: 1px solid #fedf89;
+  border-radius: 10px;
+}
+
+.notice-text a {
+  color: inherit;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.summary-grid div {
+  padding: 10px 12px;
+  background: var(--bg);
+  border-radius: 10px;
+}
+
+.summary-grid dt {
+  margin: 0 0 2px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.summary-grid dd {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.total-card {
+  display: grid;
+  gap: 8px;
+}
+
+.total-row.muted span,
+.total-row.muted strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.total-row.total-strong {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.payment-row {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bg);
+  border-radius: 12px;
+}
+
+@media (min-width: 720px) {
+  .payment-row {
+    grid-template-columns: 2fr 1fr 1fr 2fr;
+    align-items: end;
+  }
+
+  .summary-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.receipt {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 20px;
+  color: #111111;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.receipt-head {
+  text-align: center;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed #999999;
+}
+
+.receipt-head h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.receipt-head p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.receipt-meta {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0;
+  font-size: 12px;
+}
+
+.receipt-meta div,
+.receipt-totals div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.receipt-meta dt,
+.receipt-totals dt {
+  color: #555555;
+}
+
+.receipt-meta dd,
+.receipt-totals dd {
+  margin: 0;
+  text-align: right;
+}
+
+.receipt-table {
+  width: 100%;
+  margin: 12px 0;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+
+.receipt-table th,
+.receipt-table td {
+  padding: 4px 0;
+  border-bottom: 1px dashed #dddddd;
+}
+
+.receipt-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.receipt-table .right,
+.receipt-totals dd {
+  text-align: right;
+}
+
+.receipt-totals {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.receipt-total {
+  padding-top: 6px;
+  border-top: 1px solid #111111;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.receipt-payments {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed #999999;
+}
+
+.receipt-payments h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.receipt-payment {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.receipt-thanks {
+  margin: 16px 0 0;
+  font-size: 12px;
+  text-align: center;
+}
+
+@media print {
+  body {
+    background: #ffffff;
+  }
+
+  .topbar,
+  .tabs,
+  .footer,
+  .no-print {
+    display: none !important;
+  }
+
+  .layout {
+    max-width: none;
+    padding: 0;
+  }
+
+  .receipt {
+    max-width: none;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+  }
+}
+
+/* Reports. */
+
+.section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.section-head h2,
+.section-head h3 {
+  margin: 0;
+}
+
+.report-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.report-head h2 {
+  margin: 2px 0 0;
+  font-size: 22px;
+}
+
+.report-summary {
+  margin-top: 10px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.report-table {
+  width: 100%;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+
+.report-table th,
+.report-table td {
+  padding: 8px 6px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.report-table th {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.report-table td a {
+  color: var(--primary);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.report-table .right {
+  text-align: right;
+}
+
+.cash-report {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+@media print {
+  .report-head {
+    margin-top: 0;
+  }
+
+  .card,
+  .cash-report {
+    break-inside: avoid;
+    border: 0;
+    padding: 0 0 12px;
+  }
+
+  .report-table {
+    font-size: 11px;
+  }
+
+  .summary-grid div {
+    border: 1px solid #dddddd;
+  }
+}
+
+/* Administration. */
+
+.admin-section summary {
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-size: 18px;
+}
+
+.admin-section summary::marker {
+  color: var(--primary);
+}
+
+.admin-section > h2 {
+  margin-top: 16px;
+}
+
+.admin-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.admin-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.admin-row > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.admin-row .price {
+  grid-column: 2;
+}
+
+.admin-badges {
+  display: flex;
+  grid-column: 1;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.admin-row .button-link {
+  grid-column: 1 / -1;
+}
+
+.button-link.compact {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.admin-form {
+  margin-top: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.admin-form h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+@media (min-width: 720px) {
+  .admin-row {
+    grid-template-columns: 1fr auto auto auto;
+  }
+
+  .admin-row .price {
+    grid-column: auto;
+  }
+
+  .admin-badges {
+    grid-column: auto;
+  }
+
+  .admin-row .button-link {
+    grid-column: auto;
+  }
+}
+
+/* Cancellation. */
+
+.danger-zone summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--tap);
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--danger);
+}
+
+.danger-zone summary::marker {
+  color: var(--danger);
 }
