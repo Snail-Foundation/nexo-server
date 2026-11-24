@@ -247,7 +247,10 @@ button.ghost:hover {
     calc(32px + env(safe-area-inset-bottom));
 }
 
-.layout > section + section {
+.layout > section + section,
+.layout > section + details,
+.layout > details + section,
+.layout > details + details {
   margin-top: 14px;
 }
 
