@@ -6,6 +6,36 @@
   <p class="muted">Comandas enviadas. La pantalla se actualiza cada 5 segundos.</p>
 </section>
 
+<details class="card kitchen-filter"{% if !filtered %} open{% endif %}>
+  <summary>
+    <strong>Cocinas</strong>
+    <span class="muted small">{{ filter_label }}</span>
+  </summary>
+  <form method="post" action="/app/kitchen/filter" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <p class="muted small">
+      Elige las categorías que se preparan en esta cocina. La selección se guarda
+      en este dispositivo; los platos sin categoría se muestran siempre.
+    </p>
+    {% if categories.is_empty() %}
+    <p class="muted">Todavía no hay categorías en el menú.</p>
+    {% else %}
+    <div class="check-grid">
+      {% for category in categories %}
+      <label class="check">
+        <input type="checkbox" name="category_id" value="{{ category.id }}"{% if category.selected %} checked{% endif %}>
+        <span>{{ category.name }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <div class="actions">
+      <button class="primary" type="submit">Aplicar filtro</button>
+      <button class="ghost" type="submit" name="all" value="true">Mostrar todas</button>
+    </div>
+  </form>
+</details>
+
 <div
   id="kitchen-board"
   hx-get="/app/kitchen/board"

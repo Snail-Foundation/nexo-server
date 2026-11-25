@@ -5,10 +5,10 @@ use axum::body::Bytes;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum_extra::extract::CookieJar;
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use nexo_core::{
-    BranchId, CashMovementId, CashSessionId, DeviceId, DiningTableId, MenuItemId, Operation,
-    OperationKind, OrderId, OrderLineId, PaymentId, SaleId, Uuid,
+    BranchId, CashMovementId, CashSessionId, DeviceId, DiningTableId, MenuCategoryId, MenuItemId,
+    Operation, OperationKind, OrderId, OrderLineId, PaymentId, SaleId, Uuid,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -30,6 +30,7 @@ const ICON_SVG: &str = include_str!("../static/icon.svg");
 const ICON_192: &[u8] = include_bytes!("../static/icon-192.png");
 const ICON_512: &[u8] = include_bytes!("../static/icon-512.png");
 const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../static/apple-touch-icon.png");
+const KITCHEN_FILTER_COOKIE: &str = "nexo_kitchen_categories";
 
 #[derive(Clone)]
 struct PageContext {
@@ -120,6 +121,9 @@ struct KitchenTemplate {
     common: PageContext,
     active: &'static str,
     orders: Vec<KitchenOrderView>,
+    categories: Vec<KitchenCategoryView>,
+    filter_label: String,
+    filtered: bool,
 }
 
 #[derive(Template)]
@@ -127,6 +131,7 @@ struct KitchenTemplate {
 struct KitchenBoardTemplate {
     common: PageContext,
     orders: Vec<KitchenOrderView>,
+    filtered: bool,
 }
 
 #[derive(Template)]
@@ -216,6 +221,13 @@ struct OrderMenuItemView {
     id: String,
     name: String,
     price: String,
+}
+
+#[derive(Debug, Clone)]
+struct KitchenCategoryView {
+    id: String,
+    name: String,
+    selected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1496,7 +1508,7 @@ pub async fn mark_line_ready(
     .await?;
 
     if headers.contains_key("hx-request") {
-        return kitchen_board_response(&state, &session).await;
+        return kitchen_board_response(&state, &session, &jar).await;
     }
 
     Ok(Redirect::to(&format!("/app/orders/{order_id}")).into_response())
@@ -1523,19 +1535,11 @@ pub async fn mark_order_ready(
         .parse::<OrderId>()
         .map_err(|_| AppError::Validation("invalid order id".to_owned()))?
         .to_string();
-    let detail = projection::order_detail(&state.pool, &session.business_id, &order_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    let line_ids = detail
-        .lines
-        .iter()
-        .filter(|line| line.status == "sent")
-        .map(|line| line.id.clone())
-        .collect::<Vec<_>>();
-
+    let filter = kitchen_filter_ids(&jar);
     let branch_id = order_branch(&state, &session, &order_id).await?;
     let device_id = web_device(&state, &session).await?;
     let ready_at_ms = now_ms();
+    let line_ids = sent_line_ids(&state, &order_id, &filter).await?;
 
     for line_id in line_ids {
         let payload = json!({
@@ -1558,10 +1562,31 @@ pub async fn mark_order_ready(
     }
 
     if headers.contains_key("hx-request") {
-        return kitchen_board_response(&state, &session).await;
+        return kitchen_board_response(&state, &session, &jar).await;
     }
 
     Ok(Redirect::to(&format!("/app/orders/{order_id}")).into_response())
+}
+
+async fn sent_line_ids(
+    state: &AppState,
+    order_id: &str,
+    category_ids: &[String],
+) -> Result<Vec<String>, AppError> {
+    let filter = projection::category_filter_sql("mi", category_ids);
+    let sql = format!(
+        "SELECT l.id
+         FROM order_line l
+         LEFT JOIN menu_item mi ON mi.id = l.menu_item_id
+         WHERE l.order_id = ? AND l.status = 'sent'{filter}"
+    );
+
+    let mut query = sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(order_id);
+    for category_id in category_ids {
+        query = query.bind(category_id);
+    }
+
+    Ok(query.fetch_all(&state.pool).await?)
 }
 
 /// Marks one sent or ready line served from the waiter view.
@@ -1766,16 +1791,77 @@ pub async fn kitchen_page(
         return forbidden_page();
     }
 
-    let orders = load_kitchen_orders(&state, &session).await?;
+    let filter = kitchen_filter_ids(&jar);
+    let (categories, filter_label, filtered) =
+        load_kitchen_filter(&state, &session, &filter).await?;
+    let orders = load_kitchen_orders(&state, &session, &filter).await?;
 
     let html = KitchenTemplate {
         common: page_context(&session),
         active: "kitchen",
         orders,
+        categories,
+        filter_label,
+        filtered,
     }
     .render()?;
 
     Ok(Html(html).into_response())
+}
+
+/// Saves the category filter for this kitchen screen.
+pub async fn set_kitchen_filter(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    let Some(session) = auth::web_session(&state.pool, &jar).await? else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let form = parse_form(&body);
+    let Some(csrf_token) = first_value(&form, "csrf_token") else {
+        return Err(AppError::Forbidden);
+    };
+    if !auth::csrf_matches(&session, csrf_token) {
+        return Err(AppError::Forbidden);
+    }
+    require_roles(&session, &["admin", "kitchen"])?;
+
+    let all_categories: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM menu_category WHERE business_id = ?1 ORDER BY sort_order, name",
+    )
+    .bind(&session.business_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut selected = Vec::new();
+    if first_value(&form, "all").is_none() {
+        for value in all_values(&form, "category_id") {
+            if MenuCategoryId::from_str(value).is_err() {
+                continue;
+            }
+            if all_categories.iter().any(|id| id == value) && !selected.iter().any(|id| id == value)
+            {
+                selected.push(value.to_owned());
+            }
+        }
+    }
+
+    let all_selected =
+        !all_categories.is_empty() && all_categories.iter().all(|id| selected.contains(id));
+    if selected.is_empty() || all_selected {
+        return Ok((
+            jar.remove(kitchen_filter_cookie(String::new())),
+            Redirect::to("/app/kitchen"),
+        )
+            .into_response());
+    }
+
+    Ok((
+        jar.add(kitchen_filter_cookie(selected.join("+"))),
+        Redirect::to("/app/kitchen"),
+    )
+        .into_response())
 }
 
 /// HTMX fragment with the current kitchen board.
@@ -1791,21 +1877,95 @@ pub async fn kitchen_board(
         return Ok((StatusCode::FORBIDDEN, Html("Sin permiso.")).into_response());
     }
 
-    kitchen_board_response(&state, &session).await
+    kitchen_board_response(&state, &session, &jar).await
 }
 
 async fn kitchen_board_response(
     state: &AppState,
     session: &SessionUser,
+    jar: &CookieJar,
 ) -> Result<Response, AppError> {
-    let orders = load_kitchen_orders(state, session).await?;
+    let filter = kitchen_filter_ids(jar);
+    let orders = load_kitchen_orders(state, session, &filter).await?;
     let html = KitchenBoardTemplate {
         common: page_context(session),
         orders,
+        filtered: !filter.is_empty(),
     }
     .render()?;
 
     Ok(Html(html).into_response())
+}
+
+fn kitchen_filter_ids(jar: &CookieJar) -> Vec<String> {
+    let Some(cookie) = jar.get(KITCHEN_FILTER_COOKIE) else {
+        return Vec::new();
+    };
+
+    let mut ids = Vec::new();
+    for value in cookie.value().split('+') {
+        if value.is_empty() || MenuCategoryId::from_str(value).is_err() {
+            continue;
+        }
+        if !ids.iter().any(|id| id == value) {
+            ids.push(value.to_owned());
+        }
+    }
+
+    ids
+}
+
+fn kitchen_filter_cookie(value: String) -> Cookie<'static> {
+    Cookie::build((KITCHEN_FILTER_COOKIE, value))
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .path("/app")
+        .max_age(time::Duration::days(365))
+        .build()
+}
+
+async fn load_kitchen_filter(
+    state: &AppState,
+    session: &SessionUser,
+    filter: &[String],
+) -> Result<(Vec<KitchenCategoryView>, String, bool), AppError> {
+    use sqlx::Row;
+
+    let rows = sqlx::query(
+        "SELECT id, name
+         FROM menu_category
+         WHERE business_id = ?1
+         ORDER BY sort_order, name",
+    )
+    .bind(&session.business_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut categories = Vec::with_capacity(rows.len());
+    let mut selected_names = Vec::new();
+
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let name: String = row.try_get("name")?;
+        let selected = filter.is_empty() || filter.iter().any(|value| value == &id);
+        if !filter.is_empty() && selected {
+            selected_names.push(name.clone());
+        }
+        categories.push(KitchenCategoryView { id, name, selected });
+    }
+
+    let filtered = !filter.is_empty();
+    let filter_label = if filtered {
+        if selected_names.is_empty() {
+            "Ninguna cocina".to_owned()
+        } else {
+            selected_names.join(", ")
+        }
+    } else {
+        "Todas las categorías".to_owned()
+    };
+
+    Ok((categories, filter_label, filtered))
 }
 
 /// Renders the cashier dashboard: open cash session and billable orders.
@@ -4240,11 +4400,12 @@ async fn load_order_menu(
 async fn load_kitchen_orders(
     state: &AppState,
     session: &SessionUser,
+    category_ids: &[String],
 ) -> Result<Vec<KitchenOrderView>, AppError> {
     let now = now_ms();
 
     Ok(
-        projection::kitchen_orders(&state.pool, &session.business_id)
+        projection::kitchen_orders(&state.pool, &session.business_id, category_ids)
             .await?
             .into_iter()
             .map(|detail| {
@@ -6025,6 +6186,116 @@ mod tests {
                 .unwrap();
         assert_eq!(line_status, "served");
         assert_eq!(order_status, "served");
+    }
+
+    #[tokio::test]
+    async fn kitchen_filter_limits_the_board_and_bulk_ready() {
+        let (state, admin_cookie, item_id) = linked_state().await;
+        let (order_id, line_id) = open_sent_order(&state, &admin_cookie, &item_id).await;
+        add_user(&state, "Cocina", "kitchen", "1357").await;
+        let kitchen_cookie = web_login_as(&state, "Cocina", "1357").await;
+        let kitchen_csrf = csrf_for(&state, "Cocina").await;
+        let category_id: String =
+            sqlx::query_scalar("SELECT category_id FROM menu_item WHERE id = ?1")
+                .bind(&item_id)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        let other_category = Uuid::now_v7().to_string();
+        let business_id: String =
+            sqlx::query_scalar("SELECT business_id FROM menu_item WHERE id = ?1")
+                .bind(&item_id)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO menu_category (
+                id, business_id, name, sort_order, is_active, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, 'Bebidas', 1, 1, ?3, ?3)",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(&business_id)
+        .bind(now)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let hidden_cookie = format!("{kitchen_cookie}; {KITCHEN_FILTER_COOKIE}={other_category}");
+        let board = body_text(get_page(&state, "/app/kitchen", &hidden_cookie).await).await;
+        assert!(board.contains("No hay comandas para estas cocinas"));
+        assert!(!board.contains("Arepa"));
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/app/orders/{order_id}/ready"))
+                    .header(header::COOKIE, &hidden_cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header("hx-request", "true")
+                    .body(Body::from(format!("csrf_token={kitchen_csrf}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let line_status: String = sqlx::query_scalar("SELECT status FROM order_line WHERE id = ?1")
+            .bind(&line_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(line_status, "sent");
+
+        let response = post_form(
+            &state,
+            "/app/kitchen/filter",
+            &kitchen_cookie,
+            &format!("csrf_token={kitchen_csrf}&category_id={category_id}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let filter_cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find_map(|value| {
+                let cookie = value.split(';').next()?;
+                cookie
+                    .starts_with(&format!("{KITCHEN_FILTER_COOKIE}="))
+                    .then(|| cookie.to_owned())
+            })
+            .expect("the filter form sets a cookie");
+        assert!(filter_cookie.contains(&category_id));
+
+        let matching_cookie = format!("{kitchen_cookie}; {filter_cookie}");
+        let board = body_text(get_page(&state, "/app/kitchen", &matching_cookie).await).await;
+        assert!(board.contains("Arepa"));
+        assert!(!board.contains("No hay comandas para estas cocinas"));
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/app/orders/{order_id}/ready"))
+                    .header(header::COOKIE, &matching_cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header("hx-request", "true")
+                    .body(Body::from(format!("csrf_token={kitchen_csrf}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let board = body_text(response).await;
+        assert!(board.contains("Listo"));
+        let line_status: String = sqlx::query_scalar("SELECT status FROM order_line WHERE id = ?1")
+            .bind(&line_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(line_status, "ready");
     }
 
     #[tokio::test]

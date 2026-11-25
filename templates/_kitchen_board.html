@@ -1,7 +1,12 @@
 {% if orders.is_empty() %}
 <section class="card empty">
+  {% if filtered %}
+  <h2>No hay comandas para estas cocinas</h2>
+  <p class="muted">Cambia el filtro o espera nuevas rondas.</p>
+  {% else %}
   <h2>No hay comandas pendientes</h2>
   <p class="muted">Las rondas enviadas aparecen aquí.</p>
+  {% endif %}
 </section>
 {% else %}
 <section class="kitchen-grid" aria-label="Comandas">

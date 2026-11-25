@@ -2357,11 +2357,16 @@ pub async fn order_detail(
 }
 
 /// Lists orders with lines that the kitchen has not finished, oldest first.
+///
+/// When `category_ids` is not empty, only lines from those menu categories are
+/// returned. Lines without a category stay visible on every kitchen screen.
 pub async fn kitchen_orders(
     pool: &sqlx::SqlitePool,
     business_id: &str,
+    category_ids: &[String],
 ) -> Result<Vec<ProjectedOrderDetail>, AppError> {
-    let rows = sqlx::query(
+    let order_filter = category_filter_sql("kmi", category_ids);
+    let order_sql = format!(
         "SELECT
             o.id, o.order_type, o.table_id, t.name AS table_name,
             o.customer_name, o.display_code, o.status, o.opened_at_ms,
@@ -2373,34 +2378,42 @@ pub async fn kitchen_orders(
          FROM restaurant_order o
          LEFT JOIN dining_table t ON t.id = o.table_id
          LEFT JOIN order_line l ON l.order_id = o.id
-         WHERE o.business_id = ?1
+         WHERE o.business_id = ?
            AND o.status IN ('open', 'active', 'served')
            AND EXISTS (
                 SELECT 1 FROM order_line k
-                WHERE k.order_id = o.id AND k.status IN ('sent', 'ready')
+                LEFT JOIN menu_item kmi ON kmi.id = k.menu_item_id
+                WHERE k.order_id = o.id AND k.status IN ('sent', 'ready'){order_filter}
            )
          GROUP BY o.id
-         ORDER BY o.opened_at_ms, o.id",
-    )
-    .bind(business_id)
-    .fetch_all(pool)
-    .await?;
+         ORDER BY o.opened_at_ms, o.id"
+    );
+    let mut order_query = sqlx::query(sqlx::AssertSqlSafe(order_sql)).bind(business_id);
+    for category_id in category_ids {
+        order_query = order_query.bind(category_id);
+    }
+    let rows = order_query.fetch_all(pool).await?;
+
+    let line_filter = category_filter_sql("mi", category_ids);
+    let line_sql = format!(
+        "SELECT
+            l.id, l.description, l.quantity, l.unit_price_minor, l.line_total_minor,
+            l.currency, l.notes, l.status, l.round_number, l.sent_at_ms, l.void_reason
+         FROM order_line l
+         LEFT JOIN menu_item mi ON mi.id = l.menu_item_id
+         WHERE l.order_id = ? AND l.status IN ('sent', 'ready'){line_filter}
+         ORDER BY l.round_number, l.created_at_ms, l.id"
+    );
 
     let mut orders = Vec::with_capacity(rows.len());
 
     for row in &rows {
         let order = projected_order_from_row(row)?;
-        let line_rows = sqlx::query(
-            "SELECT
-                id, description, quantity, unit_price_minor, line_total_minor,
-                currency, notes, status, round_number, sent_at_ms, void_reason
-             FROM order_line
-             WHERE order_id = ?1 AND status IN ('sent', 'ready')
-             ORDER BY round_number, created_at_ms, id",
-        )
-        .bind(&order.id)
-        .fetch_all(pool)
-        .await?;
+        let mut line_query = sqlx::query(sqlx::AssertSqlSafe(line_sql.clone())).bind(&order.id);
+        for category_id in category_ids {
+            line_query = line_query.bind(category_id);
+        }
+        let line_rows = line_query.fetch_all(pool).await?;
 
         let lines = line_rows
             .iter()
@@ -2411,6 +2424,15 @@ pub async fn kitchen_orders(
     }
 
     Ok(orders)
+}
+
+pub(crate) fn category_filter_sql(alias: &str, category_ids: &[String]) -> String {
+    if category_ids.is_empty() {
+        return String::new();
+    }
+
+    let placeholders = vec!["?"; category_ids.len()].join(", ");
+    format!(" AND ({alias}.category_id IS NULL OR {alias}.category_id IN ({placeholders}))")
 }
 
 fn projected_order_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ProjectedOrder, AppError> {
@@ -2675,7 +2697,7 @@ mod tests {
         assert_eq!(detail.lines[0].void_reason, None);
 
         assert!(
-            kitchen_orders(&state.pool, &business)
+            kitchen_orders(&state.pool, &business, &[])
                 .await
                 .unwrap()
                 .is_empty()

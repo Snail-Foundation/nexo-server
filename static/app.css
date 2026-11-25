@@ -749,6 +749,51 @@ button.danger {
   flex: 1 1 auto;
 }
 
+.kitchen-filter {
+  margin-bottom: 14px;
+}
+
+.kitchen-filter summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--tap);
+  cursor: pointer;
+  font-size: 18px;
+}
+
+.kitchen-filter summary .muted {
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.check input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  accent-color: var(--primary);
+}
+
 .kitchen-grid {
   display: grid;
   gap: 14px;

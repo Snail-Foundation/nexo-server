@@ -52,7 +52,10 @@ Admin / cashier / waiter / kitchen browsers
   online/offline banner, live polling, and the sold-out toggle. The shell fits
   all tabs at 360 px, uses 48 px tap targets, marks the active tab with
   `aria-current="page"`, and serves an embedded manifest, icons, and Apple touch
-  metadata for an HTTP home-screen shortcut.
+  metadata for an HTTP home-screen shortcut. Each kitchen browser can filter the
+  board by menu category through the `nexo_kitchen_categories` cookie; mixed
+  orders show each kitchen only its own lines, uncategorized items stay visible
+  everywhere, and **Todo listo** only marks the visible lines.
 - Web cashier: finds billable orders, charges one or more payments in USD, VES,
   or a mix, supports tendered/change and references, records the sale and cash
   movements atomically, frees the table, and shows a printable receipt.
@@ -72,10 +75,11 @@ Admin / cashier / waiter / kitchen browsers
   send rounds, void, and serve; `admin` and `cashier` can bill, run cash, see
   reports, and cancel orders; `admin` and `kitchen` can mark ready; `admin` can
   use the admin module. The navigation hides modules the role cannot use.
-- 74 tests, including projection folding, billing arithmetic and IVA, the
+- 75 tests, including projection folding, billing arithmetic and IVA, the
   waiter/kitchen/cashier web flow, mixed payments and change, cash sessions,
-  reports, admin writes and backup, login throttling, permissions, CSRF, and
-  data/session/device persistence across a server restart.
+  reports, admin writes and backup, login throttling, permissions, CSRF,
+  kitchen category filtering, and data/session/device persistence across a
+  server restart.
 
 ## Routes
 
@@ -116,6 +120,7 @@ Admin / cashier / waiter / kitchen browsers
 | `POST` | `/app/admin/payment-methods` | Creates or updates a payment method |
 | `GET` | `/app/admin/backup` | Downloads a consistent SQLite copy |
 | `GET` | `/app/kitchen` | Kitchen board |
+| `POST` | `/app/kitchen/filter` | Saves the kitchen category filter for this browser |
 | `GET` | `/app/kitchen/board` | HTMX kitchen-board fragment |
 | `GET` | `/app/menu` | Menu read view with the sold-out toggle |
 | `POST` | `/app/menu/items/{id}/availability` | Marks an item available or sold out |

@@ -75,6 +75,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/app/admin/backup", get(web::admin_backup))
         .route("/app/kitchen", get(web::kitchen_page))
+        .route("/app/kitchen/filter", post(web::set_kitchen_filter))
         .route("/app/kitchen/board", get(web::kitchen_board))
         .route("/app/menu", get(web::menu_page))
         .route(
