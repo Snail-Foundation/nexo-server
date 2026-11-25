@@ -5,8 +5,9 @@ system of record and the web app is the only client for admin, cashier, waiters,
 and kitchen. The archived desktop and Flutter projects are not part of the daily
 flow.
 
-This is an **independent project**. It consumes `nexo-core` as a local path
-dependency and never embeds the desktop application.
+This is an **independent project**. It consumes `nexo-core` as an independent
+library and never embeds the desktop application. In the Snail workspace the
+dependency uses a local path to `../nexo-core`.
 
 ## Role in the product
 
@@ -150,7 +151,8 @@ Admin / cashier / waiter / kitchen browsers
 
 ## First start
 
-1. Build the release binary:
+1. Build the release binary. The project expects `nexo-core` in
+   `../nexo-core`; see [Development](#development) for the clone layout.
 
    ```sh
    cargo build --release
@@ -287,9 +289,16 @@ and any environment file. To restore, stop the service, move the current
 database aside, copy the backup into place, remove stale `-wal` and `-shm`
 files, and start the service. Never merge two server databases by hand.
 
-See [`USER_GUIDE.md`](../USER_GUIDE.md) for the operator routine.
-
 ## Development
+
+The project depends on `nexo-core` through `path = "../nexo-core"`. Clone both
+repositories side by side before building:
+
+```sh
+git clone https://github.com/Snail-Foundation/nexo-core.git
+git clone https://github.com/Snail-Foundation/nexo-server.git
+cd nexo-server
+```
 
 ```sh
 cargo fmt
@@ -311,7 +320,8 @@ Then open `http://localhost:8080` on the same machine or
 `scripts/restaurant-e2e.sh` starts a throwaway server, runs
 `nexo-restaurant/examples/server_e2e.rs` against it, and verifies the legacy
 cold-fallback slice. It is kept as a regression check for the archived desktop;
-the daily flow no longer depends on it.
+the daily flow no longer depends on it. The check requires the archived
+`nexo-restaurant` repository cloned next to this one.
 
 ```sh
 ./scripts/restaurant-e2e.sh
