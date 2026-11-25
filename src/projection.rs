@@ -270,17 +270,47 @@ async fn menu_category_upserted(
     let Some(business_id) = business_id(transaction).await? else {
         return Ok(invalid("menu_category_upserted requires a business"));
     };
+
+    // The printer mapping is optional. Older desktop operations omit the key
+    // and must keep the current mapping; a null value clears it.
+    let (printer_id, preserve_printer) = match payload.get("printer_id") {
+        None => (None, true),
+        Some(Value::Null) => (None, false),
+        Some(Value::String(value)) if value.trim().is_empty() => (None, false),
+        Some(Value::String(value)) => (Some(value.trim().to_owned()), false),
+        Some(_) => return Ok(invalid("printer_id must be a string or null")),
+    };
+    if let Some(printer_id) = &printer_id {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM printer WHERE id = ?1 AND business_id = ?2
+             )",
+        )
+        .bind(printer_id)
+        .bind(&business_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !exists {
+            return Ok(invalid("the printer does not exist"));
+        }
+    }
+
     let at = operation.created_at_ms;
 
     sqlx::query(
         "INSERT INTO menu_category (
-            id, business_id, name, sort_order, is_active,
+            id, business_id, name, sort_order, is_active, printer_id,
             created_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+         ) VALUES (?1, ?2, ?3, ?4, ?5,
+                   CASE WHEN ?7 = 1 THEN NULL ELSE ?6 END, ?8, ?8)
          ON CONFLICT (id) DO UPDATE SET
             name = excluded.name,
             sort_order = excluded.sort_order,
             is_active = excluded.is_active,
+            printer_id = CASE
+                WHEN ?7 = 1 THEN menu_category.printer_id
+                ELSE excluded.printer_id
+            END,
             updated_at_ms = excluded.updated_at_ms",
     )
     .bind(operation.entity_id.to_string())
@@ -288,6 +318,8 @@ async fn menu_category_upserted(
     .bind(name)
     .bind(sort_order)
     .bind(is_active)
+    .bind(printer_id)
+    .bind(if preserve_printer { 1_i64 } else { 0_i64 })
     .bind(at)
     .execute(&mut **transaction)
     .await?;
@@ -839,6 +871,11 @@ async fn order_sent(
         sent_at_ms,
     )
     .await?;
+
+    // Enqueue the kitchen tickets in the same transaction as the send. If no
+    // printer is configured the order still goes to the kitchen screen.
+    crate::printing::enqueue_round(transaction, operation, &order_id, round_number, sent_at_ms)
+        .await?;
 
     Ok(ProjectionOutcome::Applied)
 }
@@ -2541,6 +2578,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn category_printer_mapping_is_preserved_when_omitted() {
+        let state = test_support::state().await;
+        let business = business_id(&state.pool).await;
+        let printer_id = Uuid::now_v7().to_string();
+        let category_id = Uuid::now_v7();
+        let at: i64 = 1_700_000_000_000;
+
+        sqlx::query(
+            "INSERT INTO printer (
+                id, business_id, name, host, port, paper_width_mm, is_active,
+                created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, 'Cocina', '127.0.0.1', 9100, 80, 1, ?3, ?3)",
+        )
+        .bind(&printer_id)
+        .bind(&business)
+        .bind(at)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        sync::push(
+            &state.pool,
+            vec![operation(
+                OperationKind::MenuCategoryUpserted,
+                category_id,
+                json!({
+                    "name": "Pizzas",
+                    "sort_order": 0,
+                    "is_active": true,
+                    "printer_id": printer_id.clone(),
+                }),
+            )],
+        )
+        .await
+        .unwrap();
+        let mapped: Option<String> =
+            sqlx::query_scalar("SELECT printer_id FROM menu_category WHERE id = ?1")
+                .bind(category_id.to_string())
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(mapped.as_deref(), Some(printer_id.as_str()));
+
+        // Archived desktop operations omit the key and must keep the mapping.
+        sync::push(
+            &state.pool,
+            vec![operation(
+                OperationKind::MenuCategoryUpserted,
+                category_id,
+                json!({
+                    "name": "Pizzas y calzones",
+                    "sort_order": 0,
+                    "is_active": true,
+                }),
+            )],
+        )
+        .await
+        .unwrap();
+        let preserved: Option<String> =
+            sqlx::query_scalar("SELECT printer_id FROM menu_category WHERE id = ?1")
+                .bind(category_id.to_string())
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(preserved.as_deref(), Some(printer_id.as_str()));
+
+        sync::push(
+            &state.pool,
+            vec![operation(
+                OperationKind::MenuCategoryUpserted,
+                category_id,
+                json!({
+                    "name": "Pizzas y calzones",
+                    "sort_order": 0,
+                    "is_active": true,
+                    "printer_id": null,
+                }),
+            )],
+        )
+        .await
+        .unwrap();
+        let cleared: Option<String> =
+            sqlx::query_scalar("SELECT printer_id FROM menu_category WHERE id = ?1")
+                .bind(category_id.to_string())
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(cleared, None);
+    }
+
+    #[tokio::test]
     async fn availability_changes_are_narrow_updates() {
         let state = test_support::state().await;
         let item_id = Uuid::now_v7();
@@ -2708,6 +2836,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(events, 5);
+
+        let print_jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM print_job")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(print_jobs, 0);
     }
 
     #[tokio::test]

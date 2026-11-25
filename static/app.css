@@ -1276,8 +1276,13 @@ button.danger {
   gap: 4px;
 }
 
-.admin-row .button-link {
+.admin-row .button-link,
+.admin-row form {
   grid-column: 1 / -1;
+}
+
+.admin-row form button {
+  width: 100%;
 }
 
 .button-link.compact {
@@ -1310,8 +1315,13 @@ button.danger {
     grid-column: auto;
   }
 
-  .admin-row .button-link {
+  .admin-row .button-link,
+  .admin-row form {
     grid-column: auto;
+  }
+
+  .admin-row form button {
+    width: auto;
   }
 }
 

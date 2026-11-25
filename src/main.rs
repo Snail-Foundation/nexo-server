@@ -23,6 +23,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     auth::seed_admin(&pool, &config).await?;
 
     let addr = config.addr.clone();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let printing_worker =
+        tokio::spawn(nexo_server::printing::run_worker(pool.clone(), shutdown_rx));
     let state = AppState::new(pool, config);
     let app = router(state);
     let listener = TcpListener::bind(&addr).await?;
@@ -32,6 +35,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    let _ = shutdown_tx.send(true);
+    let _ = printing_worker.await;
 
     tracing::info!("Nexo server stopped");
 

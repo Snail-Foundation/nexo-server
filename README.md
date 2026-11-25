@@ -34,9 +34,10 @@ Admin / cashier / waiter / kitchen browsers
 
 - Axum 0.8 + SQLx 0.9 (SQLite) + Askama 0.16 + HTMX, with mobile-first CSS and
   no Node build.
-- SQLite schema v6 with 25 tables: core identity and sync, master-data
-  projections, order projections, and billing projections. Migration `0006`
-  adds `payment.tendered_minor` and `payment.change_minor`.
+- SQLite schema v7 with 27 tables: core identity and sync, master-data
+  projections, order projections, billing projections, and kitchen printing.
+  Migration `0006` adds `payment.tendered_minor` and `payment.change_minor`;
+  migration `0007` adds `printer`, `menu_category.printer_id`, and `print_job`.
 - PIN login with Argon2 hashes, hashed bearer tokens, `HttpOnly` +
   `SameSite=Strict` web session cookies, CSRF validation on logout and every
   mutating form, and a persistent login throttle shared by web login, API
@@ -56,6 +57,15 @@ Admin / cashier / waiter / kitchen browsers
   board by menu category through the `nexo_kitchen_categories` cookie; mixed
   orders show each kitchen only its own lines, uncategorized items stay visible
   everywhere, and **Todo listo** only marks the visible lines.
+- Kitchen printing: sending a round enqueues one paper comanda per network
+  thermal printer with lines in the round, in the same transaction. Each menu
+  category maps to a printer; uncategorized or unmapped lines go to the first
+  active printer. Tickets are ESC/POS over raw TCP (default port 9100), use
+  CP850 for Spanish accents, and never include prices. A background worker
+  retries transient failures with backoff and requeues interrupted jobs on
+  startup. The admin configures printers, prints a test page, and retries
+  failed jobs; an admin or cashier can reprint a sent round. With no active
+  printer, the round is still sent and the kitchen screen remains the fallback.
 - Web cashier: finds billable orders, charges one or more payments in USD, VES,
   or a mix, supports tendered/change and references, records the sale and cash
   movements atomically, frees the table, and shows a printable receipt.
@@ -65,7 +75,8 @@ Admin / cashier / waiter / kitchen browsers
 - Web reports: daily sales, included IVA, payments by method and currency, top
   items, cash closures, CSV download, and browser print/PDF.
 - Web admin: business name, exchange rate, optional IVA, menu categories and
-  items, tables, users and PINs, payment methods, and a consistent SQLite backup
+  items, category-to-printer mapping, kitchen printers, tables, users and PINs,
+  payment methods, failed print-job retry, and a consistent SQLite backup
   download.
 - Order flow: open a free table or create a takeout order, add lines and notes,
   send the pending round, void a line, mark lines or whole orders ready and
@@ -75,11 +86,12 @@ Admin / cashier / waiter / kitchen browsers
   send rounds, void, and serve; `admin` and `cashier` can bill, run cash, see
   reports, and cancel orders; `admin` and `kitchen` can mark ready; `admin` can
   use the admin module. The navigation hides modules the role cannot use.
-- 75 tests, including projection folding, billing arithmetic and IVA, the
+- 83 tests, including projection folding, billing arithmetic and IVA, the
   waiter/kitchen/cashier web flow, mixed payments and change, cash sessions,
   reports, admin writes and backup, login throttling, permissions, CSRF,
-  kitchen category filtering, and data/session/device persistence across a
-  server restart.
+  kitchen category filtering, ESC/POS rendering and CP850 accents, printer
+  routing, retries against a mock TCP printer, admin printer configuration,
+  reprints, and data/session/device persistence across a server restart.
 
 ## Routes
 
@@ -102,6 +114,7 @@ Admin / cashier / waiter / kitchen browsers
 | `POST` | `/app/orders/{id}/lines/{line_id}/void` | Voids a line with a reason |
 | `POST` | `/app/orders/{id}/lines/{line_id}/ready` | Marks one sent line ready |
 | `POST` | `/app/orders/{id}/lines/{line_id}/served` | Marks one line served |
+| `POST` | `/app/orders/{id}/rounds/{round}/reprint` | Reprints one sent round (admin or cashier) |
 | `GET`, `POST` | `/app/orders/{id}/bill` | Billing form and sale confirmation |
 | `GET` | `/app/sales/{id}` | Printable receipt |
 | `GET` | `/app/cashier` | Cashier dashboard; polls every 5 s |
@@ -118,6 +131,9 @@ Admin / cashier / waiter / kitchen browsers
 | `POST` | `/app/admin/tables` | Creates or updates a dining table |
 | `POST` | `/app/admin/users` | Creates or updates a user and PIN |
 | `POST` | `/app/admin/payment-methods` | Creates or updates a payment method |
+| `POST` | `/app/admin/printers` | Creates or updates a kitchen printer |
+| `POST` | `/app/admin/printers/{id}/test` | Queues a test ticket |
+| `POST` | `/app/admin/print-jobs/{id}/retry` | Requeues a failed print job |
 | `GET` | `/app/admin/backup` | Downloads a consistent SQLite copy |
 | `GET` | `/app/kitchen` | Kitchen board |
 | `POST` | `/app/kitchen/filter` | Saves the kitchen category filter for this browser |
@@ -151,7 +167,8 @@ Admin / cashier / waiter / kitchen browsers
 
 3. Open `http://<server-ip>:8080` and log in as `Admin` with that PIN.
 4. In **Administración**, set the business name, exchange rate, optional IVA,
-   menu, tables, users, and payment methods.
+   menu, tables, users, and payment methods. If the kitchen uses paper, add the
+   network thermal printers and map each menu category to its printer.
 5. Open **Caja**, open the first cash session, and start service.
 
 The seed runs only when the database has no users. After creating the real
@@ -233,6 +250,9 @@ sudo journalctl -u nexo-server -f
 
 - Do not forward the port on the router or expose the server to the internet.
   The MVP has no TLS or reverse proxy; local HTTPS is deferred.
+- Kitchen thermal printers must be reachable from the server on the LAN on
+  their raw TCP port, usually 9100. No inbound rule is needed on the server;
+  it is the client of the printer.
 - Verify from another device with `curl http://<server-ip>:8080/api/health`.
 
 ### Updating

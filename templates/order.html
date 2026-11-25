@@ -21,7 +21,15 @@
 {% else %}
 {% for round in order.rounds %}
 <section class="card round-card">
-  <h2>Ronda {{ round.round_number }}</h2>
+  <div class="section-head">
+    <h2>Ronda {{ round.round_number }}</h2>
+    {% if order.can_reprint && round.can_reprint %}
+    <form method="post" action="/app/orders/{{ order.id }}/rounds/{{ round.round_number }}/reprint">
+      <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+      <button class="ghost compact" type="submit">Reimprimir comanda</button>
+    </form>
+    {% endif %}
+  </div>
   <ul class="line-list">
     {% for line in round.lines %}
     <li class="order-line{% if line.is_voided %} voided{% endif %}">

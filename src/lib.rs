@@ -6,6 +6,7 @@ pub mod billing;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod printing;
 pub mod projection;
 pub mod snapshot;
 pub mod state;
@@ -51,6 +52,10 @@ pub fn router(state: AppState) -> Router {
             "/app/orders/{id}/lines/{line_id}/served",
             post(web::mark_line_served),
         )
+        .route(
+            "/app/orders/{id}/rounds/{round}/reprint",
+            post(web::reprint_round),
+        )
         .route("/app/cashier", get(web::cashier_page))
         .route(
             "/app/orders/{id}/bill",
@@ -72,6 +77,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/app/admin/payment-methods",
             post(web::admin_payment_method),
+        )
+        .route("/app/admin/printers", post(web::admin_printer))
+        .route(
+            "/app/admin/printers/{id}/test",
+            post(web::admin_printer_test),
+        )
+        .route(
+            "/app/admin/print-jobs/{id}/retry",
+            post(web::admin_print_job_retry),
         )
         .route("/app/admin/backup", get(web::admin_backup))
         .route("/app/kitchen", get(web::kitchen_page))

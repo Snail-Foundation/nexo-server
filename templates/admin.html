@@ -69,7 +69,7 @@
     <div class="admin-row">
       <div>
         <strong>{{ category.name }}</strong>
-        <span class="muted small">Orden {{ category.sort_order }}</span>
+        <span class="muted small">Orden {{ category.sort_order }}{% if category.printer_name.is_empty() %} · Sin impresora{% else %} · {{ category.printer_name }}{% if !category.printer_active %} (inactiva){% endif %}{% endif %}</span>
       </div>
       {% if category.is_active %}
       <span class="badge ok">Activa</span>
@@ -103,6 +103,19 @@
         </select>
       </label>
     </div>
+    <label class="field">
+      <span>Impresora de cocina</span>
+      <select name="printer_id">
+        <option value="">Sin impresora</option>
+        {% for printer in printers %}
+        <option value="{{ printer.id }}"{% if category_form.printer_id == printer.id %} selected{% endif %}>{{ printer.name }}{% if !printer.is_active %} (inactiva){% endif %}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <p class="muted small">
+      Las líneas de esta categoría se imprimen en la impresora elegida. Si no
+      tiene impresora activa, se envían a la primera impresora activa.
+    </p>
     <div class="actions">
       <button class="primary" type="submit">{% if category_form.id.is_empty() %}Agregar categoría{% else %}Guardar categoría{% endif %}</button>
       {% if !category_form.id.is_empty() %}
@@ -195,6 +208,110 @@
       {% endif %}
     </div>
   </form>
+</details>
+
+<details class="card admin-section" id="printing">
+  <summary><strong>Impresión de comandas</strong></summary>
+  <p class="muted">
+    Una impresora térmica de red por cocina. Al enviar una ronda, cada línea se
+    imprime en la impresora de su categoría, sin precios.
+  </p>
+  {% if !print_warning.is_empty() %}
+  <p class="notice-text">{{ print_warning }}</p>
+  {% endif %}
+
+  {% if printers.is_empty() %}
+  <p class="muted">Todavía no hay impresoras configuradas.</p>
+  {% else %}
+  <div class="admin-list">
+    {% for printer in printers %}
+    <div class="admin-row">
+      <div>
+        <strong>{{ printer.name }}</strong>
+        <span class="muted small">{{ printer.host }}:{{ printer.port }} · {{ printer.paper_width_mm }} mm</span>
+      </div>
+      {% if printer.is_active %}
+      <span class="badge ok">Activa</span>
+      {% else %}
+      <span class="badge off">Inactiva</span>
+      {% endif %}
+      <form method="post" action="/app/admin/printers/{{ printer.id }}/test">
+        <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+        <button class="ghost compact" type="submit">Probar</button>
+      </form>
+      <a class="button-link ghost compact" href="/app/admin?edit_printer={{ printer.id }}#printing">Editar</a>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <form method="post" action="/app/admin/printers" class="stack admin-form">
+    <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+    <input type="hidden" name="id" value="{{ printer_form.id }}">
+    <h3>{% if printer_form.id.is_empty() %}Nueva impresora{% else %}Editar impresora{% endif %}</h3>
+    <div class="field-row">
+      <label class="field grow">
+        <span>Nombre</span>
+        <input name="name" value="{{ printer_form.name }}" placeholder="Cocina abajo" required autocomplete="off">
+      </label>
+      <label class="field grow">
+        <span>IP o nombre de red</span>
+        <input name="host" value="{{ printer_form.host }}" placeholder="192.168.1.50" required autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Puerto</span>
+        <input name="port" value="{{ printer_form.port }}" inputmode="numeric" required autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Papel</span>
+        <select name="paper_width_mm">
+          <option value="58"{% if printer_form.paper_width_mm == 58 %} selected{% endif %}>58 mm</option>
+          <option value="80"{% if printer_form.paper_width_mm == 80 %} selected{% endif %}>80 mm</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Estado</span>
+        <select name="is_active">
+          <option value="true"{% if printer_form.is_active %} selected{% endif %}>Activa</option>
+          <option value="false"{% if !printer_form.is_active %} selected{% endif %}>Inactiva</option>
+        </select>
+      </label>
+    </div>
+    <p class="muted small">
+      Las impresoras térmicas de red suelen escuchar en el puerto 9100.
+      Usa <strong>Probar</strong> para imprimir una página de prueba.
+    </p>
+    <div class="actions">
+      <button class="primary" type="submit">{% if printer_form.id.is_empty() %}Agregar impresora{% else %}Guardar impresora{% endif %}</button>
+      {% if !printer_form.id.is_empty() %}
+      <a class="button-link ghost" href="/app/admin#printing">Cancelar</a>
+      {% endif %}
+    </div>
+  </form>
+
+  {% if !print_jobs.is_empty() %}
+  <h3>Últimos trabajos</h3>
+  <div class="admin-list">
+    {% for job in print_jobs %}
+    <div class="admin-row">
+      <div>
+        <strong>{{ job.reference }}</strong>
+        <span class="muted small">{{ job.printer }} · {{ job.created_at }} · Intentos {{ job.attempts }}</span>
+        {% if !job.last_error.is_empty() %}
+        <span class="muted small">{{ job.last_error }}</span>
+        {% endif %}
+      </div>
+      <span class="badge {{ job.status_class }}">{{ job.status_label }}</span>
+      {% if job.can_retry %}
+      <form method="post" action="/app/admin/print-jobs/{{ job.id }}/retry">
+        <input type="hidden" name="csrf_token" value="{{ common.csrf_token }}">
+        <button class="ghost compact" type="submit">Reintentar</button>
+      </form>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 </details>
 
 <details class="card admin-section" id="tables">

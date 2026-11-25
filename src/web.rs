@@ -181,6 +181,7 @@ struct OrderView {
     ready_lines: i64,
     can_edit: bool,
     can_cancel: bool,
+    can_reprint: bool,
     active: &'static str,
     back_href: &'static str,
     back_label: &'static str,
@@ -192,6 +193,7 @@ struct OrderView {
 struct OrderRoundView {
     round_number: i64,
     lines: Vec<OrderLineView>,
+    can_reprint: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -487,11 +489,15 @@ struct AdminTemplate {
     tables: Vec<AdminTableView>,
     users: Vec<AdminUserView>,
     methods: Vec<AdminMethodView>,
+    printers: Vec<AdminPrinterView>,
+    print_jobs: Vec<AdminPrintJobView>,
+    print_warning: String,
     category_form: AdminCategoryEdit,
     item_form: AdminItemEdit,
     table_form: AdminTableEdit,
     user_form: AdminUserEdit,
     method_form: AdminMethodEdit,
+    printer_form: AdminPrinterEdit,
 }
 
 #[derive(Debug, Clone)]
@@ -500,6 +506,8 @@ struct AdminCategoryView {
     name: String,
     sort_order: i64,
     is_active: bool,
+    printer_name: String,
+    printer_active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -508,6 +516,7 @@ struct AdminCategoryEdit {
     name: String,
     sort_order: i64,
     is_active: bool,
+    printer_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -587,6 +596,39 @@ struct AdminMethodEdit {
     is_active: bool,
 }
 
+#[derive(Debug, Clone)]
+struct AdminPrinterView {
+    id: String,
+    name: String,
+    host: String,
+    port: i64,
+    paper_width_mm: i64,
+    is_active: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AdminPrinterEdit {
+    id: String,
+    name: String,
+    host: String,
+    port: i64,
+    paper_width_mm: i64,
+    is_active: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AdminPrintJobView {
+    id: String,
+    printer: String,
+    reference: String,
+    status_label: &'static str,
+    status_class: &'static str,
+    attempts: i64,
+    created_at: String,
+    last_error: String,
+    can_retry: bool,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct AdminQuery {
     #[serde(default)]
@@ -599,6 +641,8 @@ pub struct AdminQuery {
     pub edit_user: String,
     #[serde(default)]
     pub edit_method: String,
+    #[serde(default)]
+    pub edit_printer: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -631,6 +675,8 @@ pub struct CategoryAdminForm {
     pub sort_order: String,
     #[serde(default)]
     pub is_active: String,
+    #[serde(default)]
+    pub printer_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -695,6 +741,23 @@ pub struct PaymentMethodAdminForm {
     pub currency: String,
     #[serde(default)]
     pub sort_order: String,
+    #[serde(default)]
+    pub is_active: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrinterAdminForm {
+    pub csrf_token: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: String,
+    #[serde(default)]
+    pub paper_width_mm: String,
     #[serde(default)]
     pub is_active: String,
 }
@@ -3248,10 +3311,13 @@ pub async fn admin_page(
         tax.unwrap_or_else(|| ("IVA".to_owned(), 0, false));
 
     let category_rows = sqlx::query(
-        "SELECT id, name, sort_order, is_active
-         FROM menu_category
-         WHERE business_id = ?1
-         ORDER BY sort_order, name",
+        "SELECT c.id, c.name, c.sort_order, c.is_active,
+                COALESCE(p.name, '') AS printer_name,
+                COALESCE(p.is_active, 0) AS printer_active
+         FROM menu_category c
+         LEFT JOIN printer p ON p.id = c.printer_id
+         WHERE c.business_id = ?1
+         ORDER BY c.sort_order, c.name",
     )
     .bind(&session.business_id)
     .fetch_all(&state.pool)
@@ -3264,6 +3330,8 @@ pub async fn admin_page(
                 name: row.try_get("name")?,
                 sort_order: row.try_get("sort_order")?,
                 is_active: row.try_get("is_active")?,
+                printer_name: row.try_get("printer_name")?,
+                printer_active: row.try_get("printer_active")?,
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
@@ -3373,11 +3441,95 @@ pub async fn admin_page(
         })
         .collect::<Result<Vec<_>, AppError>>()?;
 
+    let printer_rows = sqlx::query(
+        "SELECT id, name, host, port, paper_width_mm, is_active
+         FROM printer
+         WHERE business_id = ?1
+         ORDER BY created_at_ms, id",
+    )
+    .bind(&session.business_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let printers = printer_rows
+        .iter()
+        .map(|row| {
+            Ok(AdminPrinterView {
+                id: row.try_get("id")?,
+                name: row.try_get("name")?,
+                host: row.try_get("host")?,
+                port: row.try_get("port")?,
+                paper_width_mm: row.try_get("paper_width_mm")?,
+                is_active: row.try_get("is_active")?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+
+    let job_rows = sqlx::query(
+        "SELECT j.id, p.name AS printer, j.kind, j.status, j.attempts,
+                COALESCE(j.last_error, '') AS last_error, j.created_at_ms,
+                COALESCE(o.display_code, '') AS order_code
+         FROM print_job j
+         JOIN printer p ON p.id = j.printer_id
+         LEFT JOIN restaurant_order o ON o.id = j.order_id
+         WHERE j.business_id = ?1
+         ORDER BY j.created_at_ms DESC
+         LIMIT 6",
+    )
+    .bind(&session.business_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let print_jobs = job_rows
+        .iter()
+        .map(|row| {
+            let kind: String = row.try_get("kind")?;
+            let status: String = row.try_get("status")?;
+            let reference = if kind == "test" {
+                "Prueba de impresión".to_owned()
+            } else {
+                format!("Comanda {}", row.try_get::<String, _>("order_code")?)
+            };
+            Ok(AdminPrintJobView {
+                id: row.try_get("id")?,
+                printer: row.try_get("printer")?,
+                reference,
+                status_label: print_status_label(&status),
+                status_class: print_status_class(&status),
+                attempts: row.try_get("attempts")?,
+                created_at: format_local_datetime(row.try_get("created_at_ms")?),
+                last_error: row.try_get("last_error")?,
+                can_retry: status == "failed",
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+
+    let has_active_printers = printers.iter().any(|printer| printer.is_active);
+    let fallback_printer = printers
+        .iter()
+        .find(|printer| printer.is_active)
+        .map(|printer| printer.name.clone())
+        .unwrap_or_default();
+    let unmapped_categories = categories
+        .iter()
+        .filter(|category| {
+            category.is_active && (category.printer_name.is_empty() || !category.printer_active)
+        })
+        .count();
+    let print_warning = if !has_active_printers {
+        "No hay impresoras activas. La cocina no recibirá comandas impresas.".to_owned()
+    } else if unmapped_categories > 0 {
+        format!(
+            "{unmapped_categories} categorías activas no tienen impresora. Sus líneas se enviarán a {fallback_printer}."
+        )
+    } else {
+        String::new()
+    };
+
     let category_form = load_category_form(&state, &session, &query.edit_category).await?;
     let item_form = load_item_form(&state, &session, &query.edit_item).await?;
     let table_form = load_table_form(&state, &session, &query.edit_table).await?;
     let user_form = load_user_form(&state, &session, &query.edit_user).await?;
     let method_form = load_method_form(&state, &session, &query.edit_method).await?;
+    let printer_form = load_printer_form(&state, &session, &query.edit_printer).await?;
 
     let html = AdminTemplate {
         common: page_context(&session),
@@ -3403,11 +3555,15 @@ pub async fn admin_page(
         tables,
         users,
         methods,
+        printers,
+        print_jobs,
+        print_warning,
         category_form,
         item_form,
         table_form,
         user_form,
         method_form,
+        printer_form,
     }
     .render()?;
 
@@ -3436,12 +3592,13 @@ async fn load_category_form(
             name: String::new(),
             sort_order: 0,
             is_active: true,
+            printer_id: String::new(),
         });
     }
 
     use sqlx::Row;
     let row = sqlx::query(
-        "SELECT id, name, sort_order, is_active
+        "SELECT id, name, sort_order, is_active, COALESCE(printer_id, '') AS printer_id
          FROM menu_category WHERE id = ?1 AND business_id = ?2",
     )
     .bind(id.trim())
@@ -3454,6 +3611,44 @@ async fn load_category_form(
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         sort_order: row.try_get("sort_order")?,
+        is_active: row.try_get("is_active")?,
+        printer_id: row.try_get("printer_id")?,
+    })
+}
+
+async fn load_printer_form(
+    state: &AppState,
+    session: &SessionUser,
+    id: &str,
+) -> Result<AdminPrinterEdit, AppError> {
+    if id.trim().is_empty() {
+        return Ok(AdminPrinterEdit {
+            id: String::new(),
+            name: String::new(),
+            host: String::new(),
+            port: crate::printing::DEFAULT_PORT,
+            paper_width_mm: 80,
+            is_active: true,
+        });
+    }
+
+    use sqlx::Row;
+    let row = sqlx::query(
+        "SELECT id, name, host, port, paper_width_mm, is_active
+         FROM printer WHERE id = ?1 AND business_id = ?2",
+    )
+    .bind(id.trim())
+    .bind(&session.business_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    Ok(AdminPrinterEdit {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        host: row.try_get("host")?,
+        port: row.try_get("port")?,
+        paper_width_mm: row.try_get("paper_width_mm")?,
         is_active: row.try_get("is_active")?,
     })
 }
@@ -3834,6 +4029,23 @@ pub async fn admin_category(
     let name = admin_required_name(&form.name)?;
     let sort_order = parse_sort_order(&form.sort_order)?;
     let is_active = admin_bool(&form.is_active);
+    let printer_id = clean_optional(&form.printer_id).map(str::to_owned);
+    if let Some(printer_id) = &printer_id {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM printer WHERE id = ?1 AND business_id = ?2
+             )",
+        )
+        .bind(printer_id)
+        .bind(&session.business_id)
+        .fetch_one(&state.pool)
+        .await?;
+        if !exists {
+            return Err(AppError::Validation(
+                "the printer does not exist".to_owned(),
+            ));
+        }
+    }
 
     append_admin_operation(
         &state,
@@ -3844,6 +4056,7 @@ pub async fn admin_category(
             "name": name,
             "sort_order": sort_order,
             "is_active": is_active,
+            "printer_id": printer_id,
         }),
         "menu_category_upserted",
     )
@@ -4135,6 +4348,360 @@ pub async fn admin_payment_method(
     Ok(Redirect::to("/app/admin#payments").into_response())
 }
 
+/// Creates or updates a kitchen printer.
+pub async fn admin_printer(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<PrinterAdminForm>,
+) -> Result<Response, AppError> {
+    let Some(session) = require_admin(&state, &jar).await? else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    if !auth::csrf_matches(&session, &form.csrf_token) {
+        return Err(AppError::Forbidden);
+    }
+
+    let printer_id = admin_entity_id(&form.id)?;
+    let name = admin_required_name(&form.name)?;
+    let host = printer_host(&form.host)?;
+    let port = if form.port.trim().is_empty() {
+        crate::printing::DEFAULT_PORT
+    } else {
+        form.port
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| AppError::Validation("the printer port is invalid".to_owned()))?
+    };
+    if !(1..=65535).contains(&port) {
+        return Err(AppError::Validation(
+            "the printer port must be between 1 and 65535".to_owned(),
+        ));
+    }
+    let paper_width_mm = if form.paper_width_mm.trim().is_empty() {
+        80
+    } else {
+        form.paper_width_mm
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| AppError::Validation("the paper width is invalid".to_owned()))?
+    };
+    if !matches!(paper_width_mm, 58 | 80) {
+        return Err(AppError::Validation(
+            "the paper width must be 58 or 80 mm".to_owned(),
+        ));
+    }
+    let is_active = admin_bool(&form.is_active);
+
+    let duplicate: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM printer
+            WHERE business_id = ?1 AND name = ?2 AND id <> ?3
+         )",
+    )
+    .bind(&session.business_id)
+    .bind(&name)
+    .bind(form.id.trim())
+    .fetch_one(&state.pool)
+    .await?;
+    if duplicate {
+        return Err(AppError::Validation(
+            "a printer with that name already exists".to_owned(),
+        ));
+    }
+    if !form.id.trim().is_empty() {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM printer WHERE id = ?1 AND business_id = ?2
+             )",
+        )
+        .bind(form.id.trim())
+        .bind(&session.business_id)
+        .fetch_one(&state.pool)
+        .await?;
+        if !exists {
+            return Err(AppError::NotFound);
+        }
+    }
+
+    let device_id = web_device(&state, &session).await?;
+    let branch_id = cash_branch(&state, &session, &device_id).await?;
+    let now = now_ms();
+    let mut transaction = state.pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO printer (
+            id, business_id, name, host, port, paper_width_mm, is_active,
+            created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+         ON CONFLICT (id) DO UPDATE SET
+            name = excluded.name,
+            host = excluded.host,
+            port = excluded.port,
+            paper_width_mm = excluded.paper_width_mm,
+            is_active = excluded.is_active,
+            updated_at_ms = excluded.updated_at_ms",
+    )
+    .bind(printer_id.to_string())
+    .bind(&session.business_id)
+    .bind(&name)
+    .bind(&host)
+    .bind(port)
+    .bind(paper_width_mm)
+    .bind(is_active)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await?;
+
+    record_audit(
+        &mut transaction,
+        &session.business_id,
+        Some(&branch_id.to_string()),
+        &session.user_id,
+        &device_id.to_string(),
+        "printer_upserted",
+        "printer",
+        &printer_id.to_string(),
+        json!({
+            "name": name,
+            "host": host,
+            "port": port,
+            "paper_width_mm": paper_width_mm,
+            "is_active": is_active,
+        }),
+        now,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    Ok(Redirect::to("/app/admin#printing").into_response())
+}
+
+/// Queues a test ticket for one printer.
+pub async fn admin_printer_test(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(printer_id): Path<String>,
+    Form(form): Form<CsrfForm>,
+) -> Result<Response, AppError> {
+    let Some(session) = require_admin(&state, &jar).await? else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    if !auth::csrf_matches(&session, &form.csrf_token) {
+        return Err(AppError::Forbidden);
+    }
+
+    let printer_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM printer WHERE id = ?1 AND business_id = ?2")
+            .bind(&printer_id)
+            .bind(&session.business_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some(printer_name) = printer_name else {
+        return Err(AppError::NotFound);
+    };
+    let business_name: String = sqlx::query_scalar("SELECT name FROM business WHERE id = ?1")
+        .bind(&session.business_id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    let device_id = web_device(&state, &session).await?;
+    let branch_id = cash_branch(&state, &session, &device_id).await?;
+    let now = now_ms();
+    let mut transaction = state.pool.begin().await?;
+    let job_id = crate::printing::enqueue_test(
+        &mut transaction,
+        &session.business_id,
+        &printer_id,
+        &business_name,
+    )
+    .await?;
+
+    record_audit(
+        &mut transaction,
+        &session.business_id,
+        Some(&branch_id.to_string()),
+        &session.user_id,
+        &device_id.to_string(),
+        "printer_test_queued",
+        "printer",
+        &printer_id,
+        json!({ "printer": printer_name, "job_id": job_id }),
+        now,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    Ok(Redirect::to("/app/admin#printing").into_response())
+}
+
+/// Requeues a failed print job.
+pub async fn admin_print_job_retry(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(job_id): Path<String>,
+    Form(form): Form<CsrfForm>,
+) -> Result<Response, AppError> {
+    let Some(session) = require_admin(&state, &jar).await? else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    if !auth::csrf_matches(&session, &form.csrf_token) {
+        return Err(AppError::Forbidden);
+    }
+
+    let device_id = web_device(&state, &session).await?;
+    let branch_id = cash_branch(&state, &session, &device_id).await?;
+    let now = now_ms();
+    let mut transaction = state.pool.begin().await?;
+    let updated = sqlx::query(
+        "UPDATE print_job
+         SET status = 'pending', attempts = 0, available_at_ms = 0,
+             claimed_at_ms = NULL, printed_at_ms = NULL, last_error = NULL
+         WHERE id = ?1 AND business_id = ?2 AND status = 'failed'",
+    )
+    .bind(&job_id)
+    .bind(&session.business_id)
+    .execute(&mut *transaction)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    record_audit(
+        &mut transaction,
+        &session.business_id,
+        Some(&branch_id.to_string()),
+        &session.user_id,
+        &device_id.to_string(),
+        "print_job_retried",
+        "print_job",
+        &job_id,
+        json!({}),
+        now,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    Ok(Redirect::to("/app/admin#printing").into_response())
+}
+
+/// Queues another paper copy of one round.
+pub async fn reprint_round(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((order_id, round)): Path<(String, i64)>,
+    Form(form): Form<CsrfForm>,
+) -> Result<Response, AppError> {
+    let Some(session) = auth::web_session(&state.pool, &jar).await? else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    if !auth::csrf_matches(&session, &form.csrf_token) {
+        return Err(AppError::Forbidden);
+    }
+    require_roles(&session, &["admin", "cashier"])?;
+    if round <= 0 {
+        return Err(AppError::Validation(
+            "the round number must be positive".to_owned(),
+        ));
+    }
+
+    let order_id = order_id
+        .parse::<OrderId>()
+        .map_err(|_| AppError::Validation("invalid order id".to_owned()))?
+        .to_string();
+    let device_id = web_device(&state, &session).await?;
+    let branch_id = order_branch(&state, &session, &order_id).await?;
+    let branch_id_text = branch_id.to_string();
+    let now = now_ms();
+    let mut transaction = state.pool.begin().await?;
+    let jobs = crate::printing::enqueue_reprint(
+        &mut transaction,
+        &session.business_id,
+        &order_id,
+        round,
+        &session.display_name,
+    )
+    .await?;
+    if jobs == 0 {
+        return Err(AppError::Conflict(
+            "no active printers or no printable lines for that round".to_owned(),
+        ));
+    }
+
+    record_audit(
+        &mut transaction,
+        &session.business_id,
+        Some(&branch_id_text),
+        &session.user_id,
+        &device_id.to_string(),
+        "comanda_reprinted",
+        "restaurant_order",
+        &order_id,
+        json!({ "round_number": round, "jobs": jobs }),
+        now,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    Ok(Redirect::to(&format!("/app/orders/{order_id}")).into_response())
+}
+
+fn printer_host(value: &str) -> Result<String, AppError> {
+    let host = value.trim();
+    if host.is_empty() || host.len() > 255 {
+        return Err(AppError::Validation(
+            "the printer host is required".to_owned(),
+        ));
+    }
+    if host.contains(char::is_whitespace)
+        || host.contains('/')
+        || host.contains(':')
+        || !host
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+    {
+        return Err(AppError::Validation(
+            "the printer host must be an IP address or hostname".to_owned(),
+        ));
+    }
+
+    Ok(host.to_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_audit(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    business_id: &str,
+    branch_id: Option<&str>,
+    actor_user_id: &str,
+    device_id: &str,
+    action: &str,
+    entity_type: &str,
+    entity_id: &str,
+    details: Value,
+    created_at_ms: i64,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO audit_event (
+            id, business_id, branch_id, actor_user_id, device_id, action,
+            entity_type, entity_id, details, created_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(business_id)
+    .bind(branch_id)
+    .bind(actor_user_id)
+    .bind(device_id)
+    .bind(action)
+    .bind(entity_type)
+    .bind(entity_id)
+    .bind(serde_json::to_string(&details)?)
+    .bind(created_at_ms)
+    .execute(&mut **transaction)
+    .await?;
+
+    Ok(())
+}
+
 async fn append_admin_operation(
     state: &AppState,
     session: &SessionUser,
@@ -4298,6 +4865,8 @@ async fn order_view(
     let is_terminal = matches!(detail.order.status.as_str(), "billed" | "cancelled");
     let can_edit = can_edit_role && !is_terminal;
     let can_cancel = matches!(session.role.as_str(), "admin" | "cashier") && !is_terminal;
+    let can_reprint =
+        matches!(session.role.as_str(), "admin" | "cashier") && detail.order.status != "cancelled";
     let ready_lines = detail
         .lines
         .iter()
@@ -4306,6 +4875,7 @@ async fn order_view(
 
     let mut rounds: Vec<OrderRoundView> = Vec::new();
     for line in detail.lines {
+        let line_can_reprint = matches!(line.status.as_str(), "sent" | "ready" | "served");
         let line_view = OrderLineView {
             id: line.id.clone(),
             description: line.description,
@@ -4324,10 +4894,12 @@ async fn order_view(
         match rounds.last_mut() {
             Some(round) if round.round_number == line.round_number => {
                 round.lines.push(line_view);
+                round.can_reprint |= line_can_reprint;
             }
             _ => rounds.push(OrderRoundView {
                 round_number: line.round_number,
                 lines: vec![line_view],
+                can_reprint: line_can_reprint,
             }),
         }
     }
@@ -4362,6 +4934,7 @@ async fn order_view(
         ready_lines,
         can_edit,
         can_cancel,
+        can_reprint,
         active,
         back_href,
         back_label,
@@ -4785,6 +5358,25 @@ fn payment_kind_label(kind: &str) -> &'static str {
         "transfer" => "Transferencia",
         "mobile_payment" => "Pago móvil",
         _ => "Otro",
+    }
+}
+
+fn print_status_label(status: &str) -> &'static str {
+    match status {
+        "pending" => "Pendiente",
+        "printing" => "Imprimiendo",
+        "printed" => "Impreso",
+        "failed" => "Fallido",
+        _ => "Desconocido",
+    }
+}
+
+fn print_status_class(status: &str) -> &'static str {
+    match status {
+        "printed" => "ok",
+        "failed" => "off",
+        "pending" | "printing" => "warn",
+        _ => "neutral",
     }
 }
 
@@ -5835,6 +6427,132 @@ mod tests {
         assert!(page.contains("Cenas"));
         assert!(page.contains("Pasta"));
         assert!(page.contains("7.50 USD"));
+    }
+
+    #[tokio::test]
+    async fn admin_configures_printers_and_reprints_a_round() {
+        let (state, cookie, item_id) = linked_state().await;
+        let csrf = csrf_for(&state, "Ana").await;
+
+        let response = post_form(
+            &state,
+            "/app/admin/printers",
+            &cookie,
+            &format!(
+                "csrf_token={csrf}&id=&name=Cocina+abajo&host=127.0.0.1\
+                 &port=9100&paper_width_mm=80&is_active=true"
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let printer: (String, String, i64, i64) = sqlx::query_as(
+            "SELECT id, host, port, paper_width_mm
+             FROM printer WHERE name = 'Cocina abajo'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(printer.1, "127.0.0.1");
+        assert_eq!(printer.2, 9100);
+        assert_eq!(printer.3, 80);
+
+        let category_id: String = sqlx::query_scalar("SELECT id FROM menu_category LIMIT 1")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        let response = post_form(
+            &state,
+            "/app/admin/categories",
+            &cookie,
+            &format!(
+                "csrf_token={csrf}&id={category_id}&name=Desayunos\
+                 &sort_order=0&is_active=true&printer_id={}",
+                printer.0
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let mapped: Option<String> =
+            sqlx::query_scalar("SELECT printer_id FROM menu_category WHERE id = ?1")
+                .bind(&category_id)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(mapped.as_deref(), Some(printer.0.as_str()));
+
+        let page = body_text(get_page(&state, "/app/admin", &cookie).await).await;
+        assert!(page.contains("Impresión de comandas"));
+        assert!(page.contains("Cocina abajo"));
+        assert!(page.contains("127.0.0.1:9100"));
+
+        let (order_id, _) = open_sent_order(&state, &cookie, &item_id).await;
+        let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM print_job WHERE order_id = ?1")
+            .bind(&order_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(jobs, 1);
+
+        let response = post_form(
+            &state,
+            &format!("/app/orders/{order_id}/rounds/1/reprint"),
+            &cookie,
+            &format!("csrf_token={csrf}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM print_job WHERE order_id = ?1")
+            .bind(&order_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(jobs, 2);
+
+        let response = post_form(
+            &state,
+            &format!("/app/admin/printers/{}/test", printer.0),
+            &cookie,
+            &format!("csrf_token={csrf}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let test_jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM print_job WHERE kind = 'test'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(test_jobs, 1);
+
+        sqlx::query(
+            "UPDATE print_job
+             SET status = 'failed', attempts = 8, last_error = 'offline'
+             WHERE kind = 'test'",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let job_id: String = sqlx::query_scalar("SELECT id FROM print_job WHERE kind = 'test'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        let response = post_form(
+            &state,
+            &format!("/app/admin/print-jobs/{job_id}/retry"),
+            &cookie,
+            &format!("csrf_token={csrf}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let retried: (String, i64) =
+            sqlx::query_as("SELECT status, attempts FROM print_job WHERE id = ?1")
+                .bind(&job_id)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(retried.0, "pending");
+        assert_eq!(retried.1, 0);
     }
 
     #[tokio::test]
