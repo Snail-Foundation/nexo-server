@@ -6,7 +6,7 @@ and kitchen. The archived desktop and Flutter projects are not part of the daily
 flow.
 
 This is an **independent project**. It consumes `nexo-core` as an independent
-library and never embeds the desktop application. In the Snail workspace the
+library and never embeds the desktop application. For local development the
 dependency uses a local path to `../nexo-core`.
 
 ## Role in the product
