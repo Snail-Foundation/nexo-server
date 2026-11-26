@@ -2,23 +2,24 @@
 #
 # Cross-project integration check for the restaurant MVP.
 #
-# Starts a throwaway nexo-server, runs the nexo-restaurant example against it,
-# and verifies the server projections and the waiter web app. Both projects
-# keep their own Cargo manifests and are only connected through the public HTTP
-# protocol.
+# Starts a throwaway nexo-server, runs the nexo-restaurant-legacy example
+# against it, and verifies the server projections and the waiter web app. Both
+# projects keep their own Cargo manifests and are only connected through the
+# public HTTP protocol.
 #
 # Usage:
 #   nexo-server/scripts/restaurant-e2e.sh
 #
 # Environment:
-#   NEXO_E2E_PORT          server port (default 18090)
-#   NEXO_RESTAURANT_DIR    desktop checkout (default ../nexo-restaurant)
-#   NEXO_E2E_KEEP=1        keep the temporary directory for inspection
+#   NEXO_E2E_PORT                  server port (default 18090)
+#   NEXO_RESTAURANT_LEGACY_DIR     legacy desktop checkout
+#                                  (default ../nexo-restaurant-legacy)
+#   NEXO_E2E_KEEP=1                keep the temporary directory for inspection
 
 set -euo pipefail
 
 SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RESTAURANT_DIR="${NEXO_RESTAURANT_DIR:-$(cd "$SERVER_DIR/../nexo-restaurant" && pwd)}"
+RESTAURANT_DIR="${NEXO_RESTAURANT_LEGACY_DIR:-$(cd "$SERVER_DIR/../nexo-restaurant-legacy" && pwd)}"
 PORT="${NEXO_E2E_PORT:-18090}"
 BASE_URL="http://127.0.0.1:$PORT"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/nexo-e2e.XXXXXX")"
@@ -45,7 +46,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-[[ -d "$RESTAURANT_DIR" ]] || fail "nexo-restaurant not found at $RESTAURANT_DIR (set NEXO_RESTAURANT_DIR)"
+[[ -d "$RESTAURANT_DIR" ]] || fail "nexo-restaurant-legacy not found at $RESTAURANT_DIR (set NEXO_RESTAURANT_LEGACY_DIR)"
 command -v curl >/dev/null || fail "curl is required"
 command -v jq >/dev/null || fail "jq is required"
 command -v sqlite3 >/dev/null || fail "sqlite3 is required"
@@ -54,7 +55,7 @@ if curl -fsS "$BASE_URL/api/health" >/dev/null 2>&1; then
   fail "port $PORT already has a server (set NEXO_E2E_PORT)"
 fi
 
-echo "e2e: building nexo-server and the desktop example"
+echo "e2e: building nexo-server and the legacy desktop example"
 SERVER_TARGET="$(cargo metadata --format-version 1 --no-deps --manifest-path "$SERVER_DIR/Cargo.toml" | jq -r .target_directory)"
 RESTAURANT_TARGET="$(cargo metadata --format-version 1 --no-deps --manifest-path "$RESTAURANT_DIR/Cargo.toml" | jq -r .target_directory)"
 

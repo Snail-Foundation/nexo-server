@@ -318,18 +318,19 @@ Then open `http://localhost:8080` on the same machine or
 ## Cross-project integration check
 
 `scripts/restaurant-e2e.sh` starts a throwaway server, runs
-`nexo-restaurant/examples/server_e2e.rs` against it, and verifies the legacy
-cold-fallback slice. It is kept as a regression check for the archived desktop;
-the daily flow no longer depends on it. The check requires the archived
-`nexo-restaurant` repository cloned next to this one.
+`nexo-restaurant-legacy/examples/server_e2e.rs` against it, and verifies the
+legacy cold-fallback slice. It is kept as a regression check for the archived
+desktop; the daily flow no longer depends on it. The check requires the
+archived `nexo-restaurant-legacy` repository cloned next to this one.
 
 ```sh
 ./scripts/restaurant-e2e.sh
 ```
 
-It needs `curl`, `jq`, and `sqlite3`. Set `NEXO_RESTAURANT_DIR` if the archived
-desktop is elsewhere, `NEXO_E2E_PORT` to change the port, or `NEXO_E2E_KEEP=1`
-to keep the temporary databases.
+It needs `curl`, `jq`, and `sqlite3`. Set
+`NEXO_RESTAURANT_LEGACY_DIR` if the archived desktop is elsewhere,
+`NEXO_E2E_PORT` to change the port, or `NEXO_E2E_KEEP=1` to keep the temporary
+databases.
 
 ## Security notes
 
