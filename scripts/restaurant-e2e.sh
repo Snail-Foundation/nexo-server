@@ -19,7 +19,7 @@
 set -euo pipefail
 
 SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RESTAURANT_DIR="${NEXO_RESTAURANT_LEGACY_DIR:-$(cd "$SERVER_DIR/../nexo-restaurant-legacy" && pwd)}"
+RESTAURANT_DIR="${NEXO_RESTAURANT_LEGACY_DIR:-$SERVER_DIR/../nexo-restaurant-legacy}"
 PORT="${NEXO_E2E_PORT:-18090}"
 BASE_URL="http://127.0.0.1:$PORT"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/nexo-e2e.XXXXXX")"
